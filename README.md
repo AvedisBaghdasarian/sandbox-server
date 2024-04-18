@@ -1,3 +1,5 @@
+[English](README.md) | [中文](docs/README-zh.md)
+
 <a name="readme-top"></a>
 <!--
 *** Thanks for checking out the Best-README-Template. If you have a suggestion
