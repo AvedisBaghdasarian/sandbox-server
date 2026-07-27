@@ -33,8 +33,8 @@ from openhands.analytics.analytics_constants import (
     USER_SIGNED_UP,
 )
 from openhands.analytics.analytics_context import AnalyticsContext
+from openhands.app_server.types import AppMode
 from openhands.app_server.utils.logger import openhands_logger as logger
-from openhands.server.types import AppMode
 
 
 class AnalyticsService:

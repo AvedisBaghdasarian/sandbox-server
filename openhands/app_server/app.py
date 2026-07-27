@@ -52,8 +52,8 @@ if app_lifespan_:
 
 
 app = FastAPI(
-    title='OpenHands',
-    description='OpenHands: Code Less, Make More',
+    title='OpenHands Sandbox Server',
+    description='Standalone API and sandbox control plane for OpenHands.',
     version=get_version(),
     lifespan=combine_lifespans(*lifespans),
     routes=[Mount(path='/mcp', app=mcp_app)],
@@ -72,7 +72,7 @@ app.include_router(v1_router.router)
 app.include_router(health_router)
 
 # Middleware and static file setup (merged from listen.py)
-if os.getenv('SERVE_FRONTEND', 'true').lower() == 'true':
+if os.getenv('SERVE_FRONTEND', 'false').lower() == 'true':
     if os.path.isdir('./frontend/build'):
         app.mount(
             '/', SPAStaticFiles(directory='./frontend/build', html=True), name='dist'

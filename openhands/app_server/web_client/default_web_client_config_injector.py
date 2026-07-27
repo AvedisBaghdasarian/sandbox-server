@@ -122,21 +122,9 @@ def _get_slack_enabled() -> bool:
 
 def _get_email_enabled() -> bool:
     """Return whether transactional email delivery is configured."""
-    try:
-        from server.services.smtp_email_service import SMTPEmailService
-    except Exception:
-        smtp_enabled = bool(os.getenv('SMTP_HOST', '').strip())
-    else:
-        smtp_enabled = SMTPEmailService.is_configured()
-
-    try:
-        from server.services.email_service import EmailService
-    except Exception:
-        resend_enabled = bool(os.getenv('RESEND_API_KEY', '').strip())
-    else:
-        resend_enabled = EmailService.is_configured()
-
-    return smtp_enabled or resend_enabled
+    return bool(
+        os.getenv('SMTP_HOST', '').strip() or os.getenv('RESEND_API_KEY', '').strip()
+    )
 
 
 def _get_jira_dc_oauth_host() -> str | None:

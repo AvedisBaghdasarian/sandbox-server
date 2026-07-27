@@ -20,7 +20,7 @@ from openhands.analytics.analytics_context import (
     resolve_analytics_context,
 )
 from openhands.analytics.analytics_service import AnalyticsService
-from openhands.server.types import AppMode
+from openhands.app_server.types import AppMode
 
 _analytics_service: AnalyticsService | None = None
 

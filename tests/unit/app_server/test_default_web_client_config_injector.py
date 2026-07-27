@@ -751,38 +751,28 @@ class TestGetEmailEnabled:
     """Test cases for _get_email_enabled helper function."""
 
     def test_returns_true_when_smtp_is_configured(self):
-        """Email is enabled when the SMTP integration is configured."""
+        """Email is enabled when SMTP_HOST is configured."""
         from openhands.app_server.web_client.default_web_client_config_injector import (
             _get_email_enabled,
         )
 
-        with (
-            patch(
-                'server.services.smtp_email_service.SMTPEmailService.is_configured',
-                return_value=True,
-            ),
-            patch(
-                'server.services.email_service.EmailService.is_configured',
-                return_value=False,
-            ),
+        with patch.dict(
+            os.environ,
+            {'SMTP_HOST': 'smtp.example.com'},
+            clear=True,
         ):
             assert _get_email_enabled() is True
 
     def test_returns_true_when_resend_is_configured(self):
-        """Email is enabled when the Resend integration is configured."""
+        """Email is enabled when RESEND_API_KEY is configured."""
         from openhands.app_server.web_client.default_web_client_config_injector import (
             _get_email_enabled,
         )
 
-        with (
-            patch(
-                'server.services.smtp_email_service.SMTPEmailService.is_configured',
-                return_value=False,
-            ),
-            patch(
-                'server.services.email_service.EmailService.is_configured',
-                return_value=True,
-            ),
+        with patch.dict(
+            os.environ,
+            {'RESEND_API_KEY': 'test-key'},
+            clear=True,
         ):
             assert _get_email_enabled() is True
 
@@ -792,14 +782,5 @@ class TestGetEmailEnabled:
             _get_email_enabled,
         )
 
-        with (
-            patch(
-                'server.services.smtp_email_service.SMTPEmailService.is_configured',
-                return_value=False,
-            ),
-            patch(
-                'server.services.email_service.EmailService.is_configured',
-                return_value=False,
-            ),
-        ):
+        with patch.dict(os.environ, {}, clear=True):
             assert _get_email_enabled() is False

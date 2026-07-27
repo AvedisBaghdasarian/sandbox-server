@@ -6,7 +6,7 @@ requires = [ "poetry-core" ]
 
 [project]
 name = "openhands-ai"
-description = "OpenHands: Code Less, Make More"
+description = "Standalone API and sandbox control plane for OpenHands"
 readme = "README.md"
 license = "MIT"
 authors = [ { name = "OpenHands", email = "contact@all-hands.dev" } ]
@@ -108,8 +108,8 @@ dependencies = [
   "zope-interface==7.2",
 ]
 
-urls.Homepage = "https://github.com/OpenHands/OpenHands"
-urls.Repository = "https://github.com/OpenHands/OpenHands"
+urls.Homepage = "https://github.com/OpenHands/sandbox-server"
+urls.Repository = "https://github.com/OpenHands/sandbox-server"
 
 [dependency-groups]
 dev = [
@@ -142,11 +142,11 @@ runtime = [
 [tool.poetry]
 name = "openhands-ai"
 version = "1.11.0"
-description = "OpenHands: Code Less, Make More"
+description = "Standalone API and sandbox control plane for OpenHands"
 authors = [ "OpenHands" ]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/OpenHands/OpenHands"
+repository = "https://github.com/OpenHands/sandbox-server"
 packages = [
   { include = "openhands/**/*" },
   { include = "pyproject.toml", to = "openhands" },
