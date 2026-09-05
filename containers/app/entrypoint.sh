@@ -56,6 +56,16 @@ else
   mkdir -p /home/enduser/.cache/huggingface/hub/
 
   usermod -aG $DOCKER_SOCKET_GID enduser
+  # Named volumes arrive root-owned, but the app runs as enduser and must
+  # write its SQLite DB and workspaces there. Fix ownership once (skipped
+  # when already correct); without this the app dies on first boot with
+  # "sqlite3.OperationalError: unable to open database file".
+  for _dir in "${OH_PERSISTENCE_DIR:-${FILE_STORE_PATH:-/.openhands}}" "${WORKSPACE_BASE:-/opt/workspace_base}"; do
+    mkdir -p "$_dir"
+    if [ "$(stat -c %u "$_dir")" != "$(id -u enduser)" ]; then
+      chown -R enduser:enduser "$_dir"
+    fi
+  done
   echo "Running as enduser"
   su enduser /bin/bash -c "${*@Q}" # This magically runs any arguments passed to the script as a command
 fi
