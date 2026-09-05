@@ -46,8 +46,6 @@ services:
     pull_policy: build
     stdin_open: true
     tty: true
-    networks:
-      - coolify
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3000/health')\""]
       interval: 30s
@@ -58,7 +56,3 @@ services:
 volumes:
   sandbox_state: {}
   sandbox_workspaces: {}
-
-networks:
-  coolify:
-    external: true
