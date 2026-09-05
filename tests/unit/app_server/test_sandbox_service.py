@@ -566,3 +566,86 @@ class TestCleanupOldSandboxes:
         # Verify: No sandboxes should be stopped
         assert result == []
         mock_sandbox_service.pause_sandbox_mock.assert_not_called()
+
+
+class TestPauseOldSandboxesExempt:
+    """pause_old_sandboxes respects exempt_sandbox_ids."""
+
+    @pytest.mark.asyncio
+    async def test_exempt_sandbox_is_never_paused(self, mock_sandbox_service):
+        """The oldest sandbox, when exempt, is skipped in favor of the next."""
+        # Arrange: 3 running, limit 2 → 1 must be paused; oldest is exempt
+        now = datetime.now(timezone.utc)
+        sandboxes = [
+            create_sandbox_info(
+                'sb-old', SandboxStatus.RUNNING, now - timedelta(hours=3)
+            ),
+            create_sandbox_info(
+                'sb-mid', SandboxStatus.RUNNING, now - timedelta(hours=2)
+            ),
+            create_sandbox_info(
+                'sb-new', SandboxStatus.RUNNING, now - timedelta(hours=1)
+            ),
+        ]
+        mock_sandbox_service.search_sandboxes_mock.return_value = SandboxPage(
+            items=sandboxes, next_page_id=None
+        )
+        mock_sandbox_service.pause_sandbox_mock.return_value = True
+
+        # Act
+        result = await mock_sandbox_service.pause_old_sandboxes(
+            max_num_sandboxes=2, exempt_sandbox_ids={'sb-old'}
+        )
+
+        # Assert: exempt sandbox untouched, next-oldest paused instead
+        assert result == ['sb-mid']
+        mock_sandbox_service.pause_sandbox_mock.assert_called_once_with('sb-mid')
+
+    @pytest.mark.asyncio
+    async def test_all_exempt_pauses_nothing(self, mock_sandbox_service):
+        """When every candidate is exempt, nothing is paused and a warning is logged."""
+        # Arrange: 2 running, limit 1 → 1 must be paused, but both are exempt
+        from unittest.mock import patch
+
+        now = datetime.now(timezone.utc)
+        sandboxes = [
+            create_sandbox_info('sb1', SandboxStatus.RUNNING, now - timedelta(hours=2)),
+            create_sandbox_info('sb2', SandboxStatus.RUNNING, now - timedelta(hours=1)),
+        ]
+        mock_sandbox_service.search_sandboxes_mock.return_value = SandboxPage(
+            items=sandboxes, next_page_id=None
+        )
+
+        # Act
+        with patch(
+            'openhands.app_server.sandbox.sandbox_service._logger'
+        ) as mock_logger:
+            result = await mock_sandbox_service.pause_old_sandboxes(
+                max_num_sandboxes=1, exempt_sandbox_ids={'sb1', 'sb2'}
+            )
+
+        # Assert
+        assert result == []
+        mock_sandbox_service.pause_sandbox_mock.assert_not_called()
+        assert mock_logger.warning.called
+        assert 'protected from eviction' in str(mock_logger.warning.call_args)
+
+    @pytest.mark.asyncio
+    async def test_no_exempt_behaves_as_before(self, mock_sandbox_service):
+        """Default (None) keeps the old oldest-first behavior."""
+        # Arrange
+        now = datetime.now(timezone.utc)
+        sandboxes = [
+            create_sandbox_info('sb1', SandboxStatus.RUNNING, now - timedelta(hours=2)),
+            create_sandbox_info('sb2', SandboxStatus.RUNNING, now - timedelta(hours=1)),
+        ]
+        mock_sandbox_service.search_sandboxes_mock.return_value = SandboxPage(
+            items=sandboxes, next_page_id=None
+        )
+        mock_sandbox_service.pause_sandbox_mock.return_value = True
+
+        # Act
+        result = await mock_sandbox_service.pause_old_sandboxes(max_num_sandboxes=1)
+
+        # Assert
+        assert result == ['sb1']

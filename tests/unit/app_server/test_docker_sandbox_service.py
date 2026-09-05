@@ -424,7 +424,7 @@ class TestDockerSandboxService:
         assert result.id == 'oh-test-test_container_id'
 
         # Verify cleanup was called with the correct limit
-        mock_cleanup.assert_called_once_with(2)
+        mock_cleanup.assert_called_once_with(2, None)
 
         # Verify container was created with correct parameters
         service.docker_client.containers.run.assert_called_once()
@@ -809,7 +809,7 @@ class TestDockerSandboxService:
         mock_container.unpause.assert_called_once()
         mock_container.start.assert_not_called()
         # Verify cleanup was called with the correct limit
-        mock_cleanup.assert_called_once_with(2)
+        mock_cleanup.assert_called_once_with(2, None)
 
     async def test_resume_sandbox_from_exited(self, service):
         """Test resuming an exited sandbox."""
@@ -829,7 +829,7 @@ class TestDockerSandboxService:
         mock_container.start.assert_called_once()
         mock_container.unpause.assert_not_called()
         # Verify cleanup was called with the correct limit
-        mock_cleanup.assert_called_once_with(2)
+        mock_cleanup.assert_called_once_with(2, None)
 
     async def test_resume_sandbox_wrong_prefix(self, service):
         """Test resuming sandbox with wrong prefix."""
@@ -843,7 +843,7 @@ class TestDockerSandboxService:
         assert result is False
         service.docker_client.containers.get.assert_not_called()
         # Verify cleanup was still called
-        mock_cleanup.assert_called_once_with(2)
+        mock_cleanup.assert_called_once_with(2, None)
 
     async def test_resume_sandbox_not_found(self, service):
         """Test resuming non-existent sandbox."""
@@ -861,7 +861,7 @@ class TestDockerSandboxService:
         # Verify
         assert result is False
         # Verify cleanup was still called
-        mock_cleanup.assert_called_once_with(2)
+        mock_cleanup.assert_called_once_with(2, None)
 
     async def test_pause_sandbox_success(self, service):
         """Test pausing a running sandbox."""
@@ -947,9 +947,7 @@ class TestDockerSandboxService:
         assert (
             service._docker_status_to_sandbox_status('paused') == SandboxStatus.PAUSED
         )
-        assert (
-            service._docker_status_to_sandbox_status('exited') == SandboxStatus.PAUSED
-        )
+        assert service._docker_status_to_sandbox_status('exited') == SandboxStatus.ERROR
         assert (
             service._docker_status_to_sandbox_status('created')
             == SandboxStatus.STARTING
@@ -1144,6 +1142,57 @@ class TestDockerSandboxService:
         assert result is not None
         assert result.status == SandboxStatus.PAUSED
         service.httpx_client.get.assert_not_called()
+
+    async def test_exited_container_maps_to_error_with_detail(self, service):
+        """Exited containers are ERROR (not paused) with exit code + log tail."""
+        # Arrange
+        container = MagicMock()
+        container.name = 'oh-test-crashed'
+        container.status = 'exited'
+        container.image.tags = ['spec456']
+        container.attrs = {
+            'Created': '2024-01-15T10:30:00.000000000Z',
+            'Config': {'Env': []},
+            'NetworkSettings': {'Ports': {}},
+            'State': {'ExitCode': 3},
+        }
+        container.logs.return_value = b'\x1b[31mboom\x1b[0m\ntrace line 2\n'
+
+        # Act
+        result = await service._container_to_sandbox_info(container)
+
+        # Assert
+        assert result is not None
+        assert result.status == SandboxStatus.ERROR
+        assert result.status_detail is not None
+        assert 'exit code 3' in result.status_detail
+        assert 'boom' in result.status_detail
+        assert '\x1b[' not in result.status_detail
+        container.logs.assert_called_once_with(tail=20)
+
+    async def test_exited_container_without_logs_still_errors(self, service):
+        """Exited container with no logs still reports ERROR with exit code."""
+        # Arrange
+        container = MagicMock()
+        container.name = 'oh-test-crashed2'
+        container.status = 'exited'
+        container.image.tags = ['spec456']
+        container.attrs = {
+            'Created': '2024-01-15T10:30:00.000000000Z',
+            'Config': {'Env': []},
+            'NetworkSettings': {'Ports': {}},
+            'State': {'ExitCode': 137},
+        }
+        container.logs.return_value = b''
+
+        # Act
+        result = await service._container_to_sandbox_info(container)
+
+        # Assert
+        assert result is not None
+        assert result.status == SandboxStatus.ERROR
+        assert result.status_detail is not None
+        assert 'exit code 137' in result.status_detail
 
 
 class TestVolumeMount:
@@ -1706,3 +1755,207 @@ class TestDockerSandboxServiceHostNetwork:
         # Verify - should be STARTING because container started within grace period
         assert result is not None
         assert result.status == SandboxStatus.STARTING
+
+
+def _stale_container(
+    name='oh-test-sb1', webhook='http://host.docker.internal:9999/api/v1/webhooks'
+):
+    """A running container carrying a stale webhook URL."""
+    container = MagicMock()
+    container.name = name
+    container.id = 'cid-old'
+    container.status = 'running'
+    container.image.tags = ['img:tag']
+    container.labels = {'sandbox_spec_id': 'img:tag'}
+    container.attrs = {
+        'Created': '2024-01-15T10:30:00.000000000Z',
+        'Config': {
+            'Env': [
+                'OH_SESSION_API_KEYS_0=keep-key',
+                f'OH_WEBHOOKS_0_BASE_URL={webhook}',
+            ],
+            'WorkingDir': '/workspace',
+        },
+        'Mounts': [
+            {
+                'Type': 'volume',
+                'Name': f'openhands-workspace-{name}',
+                'Destination': '/workspace',
+                'Mode': 'rw',
+            }
+        ],
+        'State': {},
+        'NetworkSettings': {'Ports': {}},
+    }
+    return container
+
+
+class TestWebhookStaleness:
+    def test_current_url_is_fresh(self, service):
+        # Arrange: service host_port is 3000
+        env = {
+            'OH_WEBHOOKS_0_BASE_URL': 'http://host.docker.internal:3000/api/v1/webhooks'
+        }
+
+        # Act / Assert
+        assert service.is_webhook_url_stale(env) is False
+
+    def test_different_url_is_stale(self, service):
+        # Arrange
+        env = {
+            'OH_WEBHOOKS_0_BASE_URL': 'http://host.docker.internal:9999/api/v1/webhooks'
+        }
+
+        # Act / Assert
+        assert service.is_webhook_url_stale(env) is True
+
+    def test_missing_url_is_stale(self, service):
+        # Act / Assert
+        assert service.is_webhook_url_stale({}) is True
+
+
+class TestRecycleSandbox:
+    @pytest.fixture
+    def new_info(self):
+        from openhands.app_server.sandbox.sandbox_models import SandboxInfo
+
+        return SandboxInfo(
+            id='oh-test-sb1',
+            created_by_user_id=None,
+            sandbox_spec_id='img:tag',
+            status=SandboxStatus.RUNNING,
+            session_api_key='keep-key',
+            exposed_urls=[],
+            created_at=datetime.now(timezone.utc),
+        )
+
+    @pytest.fixture
+    def mock_spec(self):
+        spec = MagicMock()
+        spec.id = 'img:tag'
+        spec.initial_env = {}
+        spec.working_dir = '/workspace'
+        spec.command = None
+        return spec
+
+    async def test_fresh_url_is_noop(self, service):
+        """A container with the current webhook URL is returned untouched."""
+        # Arrange
+        container = _stale_container(
+            webhook='http://host.docker.internal:3000/api/v1/webhooks'
+        )
+        container.status = 'paused'
+        service.docker_client.containers.get.return_value = container
+
+        # Act
+        result = await service.recycle_sandbox('oh-test-sb1', [])
+
+        # Assert
+        assert result is not None
+        assert result.status == SandboxStatus.PAUSED
+        service.docker_client.containers.run.assert_not_called()
+        container.rename.assert_not_called()
+
+    async def test_stale_recycle_preserves_identity_and_volume(
+        self, service, mock_spec, new_info
+    ):
+        """Recycle re-runs the same name/key/volume with a fresh webhook URL."""
+        # Arrange
+        old = _stale_container()
+        service.docker_client.containers.get.return_value = old
+        new = MagicMock()
+        new.name = 'oh-test-sb1'
+        service.docker_client.containers.run.return_value = new
+
+        # Act
+        with (
+            patch(
+                'openhands.app_server.sandbox.docker_sandbox_service.resolve_sandbox_spec',
+                AsyncMock(return_value=mock_spec),
+            ),
+            patch.object(
+                DockerSandboxService,
+                'wait_for_sandbox_running',
+                AsyncMock(return_value=new_info),
+            ),
+        ):
+            result = await service.recycle_sandbox('oh-test-sb1', [])
+
+        # Assert
+        assert result is new_info
+        old.stop.assert_called_once()
+        old.rename.assert_called_once()
+        quarantine = old.rename.call_args[0][0]
+        assert quarantine.startswith('oh-test-sb1-stale-')
+        run_kwargs = service.docker_client.containers.run.call_args[1]
+        assert run_kwargs['name'] == 'oh-test-sb1'
+        assert run_kwargs['image'] == 'img:tag'
+        assert run_kwargs['environment']['OH_SESSION_API_KEYS_0'] == 'keep-key'
+        assert (
+            run_kwargs['environment']['OH_WEBHOOKS_0_BASE_URL']
+            == 'http://host.docker.internal:3000/api/v1/webhooks'
+        )
+        assert run_kwargs['volumes']['openhands-workspace-oh-test-sb1'] == {
+            'bind': '/workspace',
+            'mode': 'rw',
+        }
+        old.remove.assert_called_once()  # quarantine removed after healthy
+        service.httpx_client.post.assert_not_called()  # no shells to recreate
+
+    async def test_failed_rebuild_rolls_back(self, service, mock_spec):
+        """A failed re-run renames the old container back and raises."""
+        # Arrange
+        old = _stale_container()
+        service.docker_client.containers.get.return_value = old
+        service.docker_client.containers.run.side_effect = APIError('boom')
+
+        # Act
+        with (
+            patch(
+                'openhands.app_server.sandbox.docker_sandbox_service.resolve_sandbox_spec',
+                AsyncMock(return_value=mock_spec),
+            ),
+            pytest.raises(SandboxError, match='Failed to recycle'),
+        ):
+            await service.recycle_sandbox('oh-test-sb1', [])
+
+        # Assert: quarantined, then renamed back and started; stale kept
+        assert old.rename.call_count == 2
+        assert old.rename.call_args_list[1][0][0] == 'oh-test-sb1'
+        old.start.assert_called_once()
+        old.remove.assert_not_called()
+
+
+class TestDockerOffEventLoop:
+    async def test_daemon_calls_run_in_worker_threads(self, service):
+        """Blocking docker-py calls must not run on the event loop thread."""
+        # Arrange
+        import threading
+
+        recorded = []
+        main_thread = threading.main_thread()
+
+        paused = MagicMock()
+        paused.name = 'oh-test-abc123'
+        paused.status = 'paused'
+        paused.image.tags = ['spec456']
+        paused.attrs = {
+            'Created': '2024-01-15T10:30:00.000000000Z',
+            'Config': {'Env': []},
+            'NetworkSettings': {'Ports': {}},
+        }
+
+        class FakeContainers:
+            def list(self, all=False):
+                recorded.append(threading.current_thread() is main_thread)
+                return [paused]
+
+        service.docker_client.containers = FakeContainers()
+
+        # Act
+        result = await service.search_sandboxes()
+
+        # Assert: the daemon call ran off the loop, results still mapped
+        assert recorded == [False]
+        assert len(result.items) == 1
+        assert result.items[0].status == SandboxStatus.PAUSED

@@ -190,6 +190,10 @@ class ProcessSandboxService(SandboxService):
                     return SandboxStatus.RUNNING
                 elif status == psutil.STATUS_STOPPED:
                     return SandboxStatus.PAUSED
+                elif status == psutil.STATUS_ZOMBIE:
+                    # A zombie is a terminated process awaiting reaping — dead,
+                    # not starting.
+                    return SandboxStatus.ERROR
                 else:
                     return SandboxStatus.STARTING
             else:
@@ -305,9 +309,12 @@ class ProcessSandboxService(SandboxService):
         return None
 
     async def start_sandbox(
-        self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
+        self,
+        sandbox_spec_id: str | None = None,
+        sandbox_id: str | None = None,
+        exempt_sandbox_ids: set[str] | None = None,
     ) -> SandboxInfo:
-        """Start a new sandbox."""
+        """Start a new sandbox (process mode performs no eviction)."""
         # Get sandbox spec
         sandbox_spec = await resolve_sandbox_spec(
             sandbox_spec_id,
@@ -357,8 +364,10 @@ class ProcessSandboxService(SandboxService):
 
         return await self._process_to_sandbox_info(sandbox_id, process_info)
 
-    async def resume_sandbox(self, sandbox_id: str) -> bool:
-        """Resume a paused sandbox."""
+    async def resume_sandbox(
+        self, sandbox_id: str, exempt_sandbox_ids: set[str] | None = None
+    ) -> bool:
+        """Resume a paused sandbox (process mode performs no eviction)."""
         process_info = _processes.get(sandbox_id)
         if process_info is None:
             return False

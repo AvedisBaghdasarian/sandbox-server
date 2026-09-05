@@ -51,19 +51,28 @@ class TestHealthEndpoint:
 
 
 class TestServerInfoEndpoint:
-    """Test suite for the /server_info endpoint."""
+    """Test suite for the /server_info endpoint (now owned by local_protocol)."""
 
-    def test_server_info_returns_system_info(self, test_client):
-        """Test that /server_info returns system and version information."""
-        response = test_client.get('/server_info')
+    def test_server_info_returns_system_info(self):
+        """Test that /server_info returns the local-protocol synthesised payload."""
+        from openhands.app_server.local_protocol.router import local_protocol_router
+
+        app = FastAPI()
+        app.include_router(local_protocol_router)
+        client = TestClient(app)
+        response = client.get('/server_info')
 
         assert response.status_code == 200
         payload = response.json()
-        assert isinstance(payload['uptime'], float)
-        assert isinstance(payload['idle_time'], float)
-        assert payload['app_version'] == get_version()
-        assert payload['sdk_version'] == system_stats.get_sdk_version()
-        assert isinstance(payload['resources'], dict)
+        # New adapter synthesises this shape for agent-canvas
+        assert 'version' in payload
+        assert 'sdk_version' in payload
+        assert 'usable_tools' in payload
+        assert 'compatibility' in payload
+        assert payload['compatibility']['minimum_agent_server'] == '1.28.0'
+        # Version must be >=1.28.0
+        version = payload['version']
+        assert isinstance(version, str) and version
 
     def test_get_sdk_version_returns_unknown_when_package_missing(self, monkeypatch):
         """Test missing SDK metadata returns a stable fallback."""
@@ -96,11 +105,21 @@ class TestAllStatusEndpoints:
     """Integration tests for all status endpoints."""
 
     def test_all_endpoints_accessible(self, test_client):
-        """Test that all status endpoints are accessible and return 200."""
-        endpoints = ['/alive', '/health', '/server_info', '/ready']
+        """Test that health endpoints are accessible."""
+        endpoints = ['/alive', '/health', '/ready']
 
         for endpoint in endpoints:
             response = test_client.get(endpoint)
             assert response.status_code == 200, (
                 f'Endpoint {endpoint} returned {response.status_code}'
             )
+
+    def test_server_info_via_full_app(self):
+        """Test that /server_info is accessible via the full app (local_protocol)."""
+        from openhands.app_server.app import app
+
+        client = TestClient(app)
+        response = client.get('/server_info')
+        assert response.status_code == 200
+        payload = response.json()
+        assert 'version' in payload

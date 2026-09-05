@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 
@@ -53,6 +54,18 @@ _SCHEDULING_MARKERS = (
 _GENERIC_START_FAILURE = (
     'The sandbox failed to start for an unexpected reason. Please try again.'
 )
+
+
+def get_sandbox_startup_timeout() -> int:
+    """Sandbox startup wait in seconds (default 300, via OH_SANDBOX_STARTUP_TIMEOUT).
+
+    Single source of truth shared by the app_server's own conversation-start
+    flow, the local-protocol adapter, and sandbox recycling.
+    """
+    try:
+        return int(os.getenv('OH_SANDBOX_STARTUP_TIMEOUT', '300'))
+    except ValueError:
+        return 300
 
 
 def _classify_start_failure(detail: str | None) -> str | None:
@@ -155,21 +168,29 @@ class SandboxService(ABC):
 
     @abstractmethod
     async def start_sandbox(
-        self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
+        self,
+        sandbox_spec_id: str | None = None,
+        sandbox_id: str | None = None,
+        exempt_sandbox_ids: set[str] | None = None,
     ) -> SandboxInfo:
         """Begin the process of starting a sandbox.
 
         Return the info on the new sandbox. If no spec is selected, use the default.
         If sandbox_id is provided, it will be used as the sandbox identifier instead
-        of generating a random one.
+        of generating a random one. Sandboxes in ``exempt_sandbox_ids`` are never
+        paused by eviction triggered from this start.
         """
 
     @abstractmethod
-    async def resume_sandbox(self, sandbox_id: str) -> bool:
+    async def resume_sandbox(
+        self, sandbox_id: str, exempt_sandbox_ids: set[str] | None = None
+    ) -> bool:
         """Begin the process of resuming a sandbox.
 
         Return True if the sandbox exists and is being resumed or is already running.
-        Return False if the sandbox did not exist.
+        Return False if the sandbox did not exist. Sandboxes in
+        ``exempt_sandbox_ids`` are never paused by eviction triggered from this
+        resume.
         """
 
     async def wait_for_sandbox_running(
@@ -315,12 +336,20 @@ class SandboxService(ABC):
         """
         return True
 
-    async def pause_old_sandboxes(self, max_num_sandboxes: int) -> list[str]:
+    async def pause_old_sandboxes(
+        self,
+        max_num_sandboxes: int,
+        exempt_sandbox_ids: set[str] | None = None,
+    ) -> list[str]:
         """Pause the oldest sandboxes if there are more than max_num_sandboxes running.
         In a multi user environment, this will pause sandboxes only for the current user.
 
         Args:
             max_num_sandboxes: Maximum number of sandboxes to keep running
+            exempt_sandbox_ids: Sandbox IDs that must never be paused (e.g. sandboxes
+                backing active conversations). If exemptions leave fewer eligible
+                sandboxes than needed, only the eligible ones are paused and a
+                warning is logged.
 
         Returns:
             List of sandbox IDs that were paused
@@ -341,11 +370,14 @@ class SandboxService(ABC):
         # Sort by creation time (oldest first)
         running_sandboxes.sort(key=lambda x: x.created_at)
 
+        exempt = exempt_sandbox_ids or set()
+        eligible = [s for s in running_sandboxes if s.id not in exempt]
+
         # Determine how many to pause
         num_to_pause = len(running_sandboxes) - max_num_sandboxes
-        sandboxes_to_pause = running_sandboxes[:num_to_pause]
+        sandboxes_to_pause = eligible[:num_to_pause]
 
-        # Stop the oldest sandboxes
+        # Stop the oldest eligible sandboxes
         paused_sandbox_ids = []
         for sandbox in sandboxes_to_pause:
             try:
@@ -355,6 +387,13 @@ class SandboxService(ABC):
             except Exception:
                 # Continue trying to pause other sandboxes even if one fails
                 pass
+
+        if len(sandboxes_to_pause) < num_to_pause:
+            _logger.warning(
+                f'Sandbox limit exceeded ({len(running_sandboxes)} running, limit '
+                f'{max_num_sandboxes}): {num_to_pause - len(sandboxes_to_pause)} '
+                'active sandbox(es) protected from eviction'
+            )
 
         return paused_sandbox_ids
 

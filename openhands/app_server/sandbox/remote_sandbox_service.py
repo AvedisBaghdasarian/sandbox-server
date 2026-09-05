@@ -440,12 +440,17 @@ class RemoteSandboxService(SandboxService):
         )
 
     async def start_sandbox(
-        self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
+        self,
+        sandbox_spec_id: str | None = None,
+        sandbox_id: str | None = None,
+        exempt_sandbox_ids: set[str] | None = None,
     ) -> SandboxInfo:
         """Start a new sandbox by creating a remote runtime."""
         try:
             # Enforce sandbox limits by cleaning up old sandboxes
-            await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
+            await self.pause_old_sandboxes(
+                self.max_num_sandboxes - 1, exempt_sandbox_ids
+            )
 
             # Get sandbox spec
             user_default_spec_id = await self.user_context.get_default_sandbox_spec_id()
@@ -517,7 +522,9 @@ class RemoteSandboxService(SandboxService):
             _logger.exception('Failed to start sandbox', stack_info=True)
             raise SandboxError('Failed to start sandbox') from e
 
-    async def resume_sandbox(self, sandbox_id: str) -> bool:
+    async def resume_sandbox(
+        self, sandbox_id: str, exempt_sandbox_ids: set[str] | None = None
+    ) -> bool:
         """Resume a paused sandbox.
 
         Security: When a sandbox is resumed, the runtime-api generates a new
@@ -525,7 +532,7 @@ class RemoteSandboxService(SandboxService):
         keys and ensures that only the new key can be used to access secrets.
         """
         # Enforce sandbox limits by cleaning up old sandboxes
-        await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
+        await self.pause_old_sandboxes(self.max_num_sandboxes - 1, exempt_sandbox_ids)
 
         try:
             stored_sandbox = await self._get_stored_sandbox(sandbox_id)
@@ -793,11 +800,16 @@ class RemoteSandboxService(SandboxService):
             )
         return archived
 
-    async def pause_old_sandboxes(self, max_num_sandboxes: int) -> list[str]:
+    async def pause_old_sandboxes(
+        self,
+        max_num_sandboxes: int,
+        exempt_sandbox_ids: set[str] | None = None,
+    ) -> list[str]:
         """Pause the oldest running sandboxes until at most max_num_sandboxes remain.
 
         Uses _get_user_running_sandboxes (runtime /list + DB cross-reference) so
-        only sandboxes that are actually running are considered.
+        only sandboxes that are actually running are considered. Sandboxes in
+        ``exempt_sandbox_ids`` are never paused.
         """
         if max_num_sandboxes <= 0:
             raise ValueError('max_num_sandboxes must be greater than 0')
@@ -807,15 +819,23 @@ class RemoteSandboxService(SandboxService):
         if len(running) <= max_num_sandboxes:
             return []
 
+        exempt = exempt_sandbox_ids or set()
+        eligible = [s for s in running if s.id not in exempt]
+
         # running is sorted oldest-first; pause the oldest to make room
         num_to_pause = len(running) - max_num_sandboxes
         paused_ids: list[str] = []
-        for sandbox in running[:num_to_pause]:
+        for sandbox in eligible[:num_to_pause]:
             try:
                 if await self.pause_sandbox(sandbox.id):
                     paused_ids.append(sandbox.id)
             except Exception:
                 pass
+        if len(eligible[:num_to_pause]) < num_to_pause:
+            _logger.warning(
+                f'Sandbox limit exceeded ({len(running)} running, limit '
+                f'{max_num_sandboxes}): active sandboxes protected from eviction'
+            )
         return paused_ids
 
     async def batch_get_sandboxes(

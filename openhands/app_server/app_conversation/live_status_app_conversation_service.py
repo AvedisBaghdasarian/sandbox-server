@@ -89,7 +89,10 @@ from openhands.app_server.sandbox.sandbox_models import (
     SandboxInfo,
     SandboxStatus,
 )
-from openhands.app_server.sandbox.sandbox_service import SandboxService
+from openhands.app_server.sandbox.sandbox_service import (
+    SandboxService,
+    get_sandbox_startup_timeout,
+)
 from openhands.app_server.sandbox.sandbox_spec_service import (
     SandboxSpecService,
     is_custom_sandbox_spec,
@@ -922,10 +925,34 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             # Return empty counts on error - will default to first sandbox
             return {}
 
+    async def _get_referenced_sandbox_ids(self) -> set[str]:
+        """Sandbox ids backing existing conversations (protected from eviction)."""
+        referenced: set[str] = set()
+        try:
+            page_id: str | None = None
+            while True:
+                page = await self.app_conversation_info_service.search_app_conversation_info(
+                    page_id=page_id, limit=100
+                )
+                for item in page.items:
+                    referenced.add(item.sandbox_id)
+                if not page.next_page_id:
+                    break
+                page_id = page.next_page_id
+        except Exception:
+            _logger.warning(
+                'Failed to list referenced sandboxes for eviction exemption',
+                exc_info=True,
+            )
+        return referenced
+
     async def _wait_for_sandbox_start(
         self, task: AppConversationStartTask
     ) -> AsyncGenerator[AppConversationStartTask, None]:
         """Wait for sandbox to start and return info."""
+        # Sandboxes backing existing conversations must never be evicted to
+        # make room for this one.
+        exempt_sandbox_ids = await self._get_referenced_sandbox_ids()
         # Get or create the sandbox
         if not task.request.sandbox_id:
             # First try to find a running sandbox for the current user
@@ -941,7 +968,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 )
 
                 sandbox = await self.sandbox_service.start_sandbox(
-                    sandbox_id=sandbox_id_str
+                    sandbox_id=sandbox_id_str,
+                    exempt_sandbox_ids=exempt_sandbox_ids,
                 )
             task.sandbox_id = sandbox.id
         else:
@@ -970,7 +998,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
         # Resume if paused
         if sandbox.status == SandboxStatus.PAUSED:
-            await self.sandbox_service.resume_sandbox(sandbox.id)
+            await self.sandbox_service.resume_sandbox(
+                sandbox.id, exempt_sandbox_ids=exempt_sandbox_ids
+            )
 
         # Check for immediate error states
         if sandbox.status in (None, SandboxStatus.ERROR):
@@ -3030,7 +3060,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
 class LiveStatusAppConversationServiceInjector(AppConversationServiceInjector):
     sandbox_startup_timeout: int = Field(
-        default=120, description='The max timeout time for sandbox startup'
+        default_factory=get_sandbox_startup_timeout,
+        description='The max timeout time for sandbox startup',
     )
     sandbox_startup_poll_frequency: int = Field(
         default=2, description='The frequency to poll for sandbox readiness'

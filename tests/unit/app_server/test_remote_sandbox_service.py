@@ -513,7 +513,7 @@ class TestSandboxLifecycle:
         assert sandbox_info.id == 'test-sandbox-123'
         assert sandbox_info.status == SandboxStatus.RUNNING
         remote_sandbox_service.pause_old_sandboxes.assert_called_once_with(
-            9
+            9, None
         )  # max_num_sandboxes - 1
         remote_sandbox_service.db_session.add.assert_called_once()
         remote_sandbox_service.db_session.commit.assert_not_called()
@@ -641,7 +641,7 @@ class TestSandboxLifecycle:
 
         # Verify
         assert result is True
-        remote_sandbox_service.pause_old_sandboxes.assert_called_once_with(9)
+        remote_sandbox_service.pause_old_sandboxes.assert_called_once_with(9, None)
         remote_sandbox_service.httpx_client.request.assert_called_once_with(
             'POST',
             'https://api.example.com/resume',

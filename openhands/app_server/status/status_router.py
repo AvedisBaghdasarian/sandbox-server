@@ -1,7 +1,5 @@
 from fastapi import APIRouter
 
-from openhands.app_server.status.system_stats import get_system_info
-
 router = APIRouter(tags=['Status'])
 
 
@@ -23,17 +21,6 @@ async def health() -> str:
     to determine if the service should receive traffic.
     """
     return 'OK'
-
-
-@router.get('/server_info')
-async def get_server_info():
-    """Server information endpoint.
-
-    Returns system information including CPU count, memory usage, and
-    other runtime details about the server. Useful for monitoring and
-    debugging purposes.
-    """
-    return get_system_info()
 
 
 @router.get('/ready')

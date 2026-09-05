@@ -157,14 +157,14 @@ def get_agent_server_env() -> dict[str, str]:
     This function combines two sources of environment variables:
 
     1. **Auto-forwarded variables**: Environment variables with certain prefixes
-       (e.g., LLM_*, LMNR_*) are automatically forwarded to the agent-server container.
-       This ensures that LLM configuration like timeouts and retry settings
-       work correctly in the two-container V1 architecture, as well as
-       Laminar monitoring/analytics configuration.
+        (e.g., LLM_*, LMNR_*) are automatically forwarded to the agent-server container.
+        This ensures that LLM configuration like timeouts and retry settings
+        work correctly in the two-container V1 architecture, as well as
+        Laminar monitoring/analytics configuration.
 
     2. **Explicit overrides via OH_AGENT_SERVER_ENV**: A JSON string that allows
-       setting arbitrary environment variables in the agent-server container.
-       Values set here take precedence over auto-forwarded variables.
+        setting arbitrary environment variables in the agent-server container.
+        Values set here take precedence over auto-forwarded variables.
 
     Auto-forwarded prefixes:
         - LLM_* : LLM configuration (timeout, retries, model settings, etc.)
@@ -190,7 +190,7 @@ def get_agent_server_env() -> dict[str, str]:
 
     Returns:
         dict[str, str]: Dictionary of environment variable names to values.
-                       Returns empty dict if no variables are found.
+                        Returns empty dict if no variables are found.
 
     Raises:
         JSONDecodeError: If OH_AGENT_SERVER_ENV contains invalid JSON.
@@ -201,6 +201,13 @@ def get_agent_server_env() -> dict[str, str]:
     for key, value in os.environ.items():
         if any(key.startswith(prefix) for prefix in AUTO_FORWARD_PREFIXES):
             result[key] = value
+
+    # OH_SECRET_KEY must be forwarded so the sandbox agent-server can decrypt
+    # agent_settings that were encrypted with it (local-protocol conversation
+    # create).
+    secret_key = os.getenv('OH_SECRET_KEY')
+    if secret_key:
+        result['OH_SECRET_KEY'] = secret_key
 
     # Step 2: Apply explicit overrides from OH_AGENT_SERVER_ENV
     # These take precedence over auto-forwarded variables
