@@ -1,24 +1,58 @@
+# Coolify deployment for the OpenHands sandbox server (with local-protocol
+# adapter). Coolify builds this from the `coolify` branch and injects any
+# ${...} variable below from the service's Environment UI — defaults apply
+# when a variable is left unset.
+#
+# The app listens on container port 3000: point Coolify's domain at container
+# port 3000. The published host port (APP_PORT, default 3000) must stay
+# reachable on the Docker host because sandboxes call back to
+# host.docker.internal:${APP_PORT}/api/v1/webhooks.
 
 services:
   sandbox-server:
     build:
       context: ./
       dockerfile: ./containers/app/Dockerfile
-    image: openhands-sandbox-server:latest
-    container_name: openhands-sandbox-server-${DATE:-}
+    image: openhands-sandbox-server:coolify
+    restart: unless-stopped
     environment:
+      # Required: key the browser/agent-canvas sends as X-Session-API-Key.
+      - SESSION_API_KEY=${SESSION_API_KEY:?Set SESSION_API_KEY in the Coolify environment UI}
+      # Required: settings/secrets encryption. Generate once, never change it.
+      - OH_SECRET_KEY=${OH_SECRET_KEY:?Set OH_SECRET_KEY in the Coolify environment UI}
+      # Required by the image entrypoint (runs the app as this uid).
+      - SANDBOX_USER_ID=${SANDBOX_USER_ID:-1000}
+      # Sandbox runtime image (one container per session is started from this).
       - AGENT_SERVER_IMAGE_REPOSITORY=${AGENT_SERVER_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
-      - AGENT_SERVER_IMAGE_TAG=${AGENT_SERVER_IMAGE_TAG:-1.30.0-python}
-      #- SANDBOX_USER_ID=${SANDBOX_USER_ID:-1234} # enable this only if you want a specific non-root sandbox user but you will have to manually adjust permissions of ~/.openhands for this user
-      - WORKSPACE_MOUNT_PATH=${WORKSPACE_BASE:-$PWD/workspace}
+      - AGENT_SERVER_IMAGE_TAG=${AGENT_SERVER_IMAGE_TAG:-1.37.1-python}
+      # Host-side port of this service (must match the published port below).
+      - OH_SANDBOX_HOST_PORT=${APP_PORT:-3000}
+      # Sandbox boot grace before a start is reported as failed.
+      - OH_SANDBOX_STARTUP_TIMEOUT=${OH_SANDBOX_STARTUP_TIMEOUT:-300}
+      # Sandbox backend: docker (default). Set to local/process or remote to change.
+      - RUNTIME=${RUNTIME:-}
+      # Non-empty keeps the workspace base mounted (see entrypoint.sh).
+      - WORKSPACE_MOUNT_PATH=${WORKSPACE_MOUNT_PATH:-/opt/workspace_base}
+      # Optional: forwarded into every sandbox (LLM_* vars are auto-forwarded).
+      # Set LLM_API_KEY / LLM_MODEL in the Coolify UI if you want them baked in.
     ports:
-      - "3000:3000"
+      - "${APP_PORT:-3000}:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/.openhands:/.openhands
-      - ${WORKSPACE_BASE:-$PWD/workspace}:/opt/workspace_base
+      - sandbox_state:/.openhands
+      - sandbox_workspaces:/opt/workspace_base
     pull_policy: build
     stdin_open: true
     tty: true
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3000/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  sandbox_state: {}
+  sandbox_workspaces: {}
