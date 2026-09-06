@@ -24,7 +24,7 @@ services:
       - SANDBOX_USER_ID=${SANDBOX_USER_ID:-1000}
       # Sandbox runtime image (one container per session is started from this).
       - AGENT_SERVER_IMAGE_REPOSITORY=${AGENT_SERVER_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
-      - AGENT_SERVER_IMAGE_TAG=${AGENT_SERVER_IMAGE_TAG:-1.37.1-python}
+      - AGENT_SERVER_IMAGE_TAG=${AGENT_SERVER_IMAGE_TAG:-1.44.1-python}
       # Host-side port of this service (must match the published port below).
       - OH_SANDBOX_HOST_PORT=${APP_PORT:-3000}
       # Sandbox boot grace before a start is reported as failed.

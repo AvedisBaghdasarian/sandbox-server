@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import os
+import time
+import uuid
 from typing import Any
 from uuid import UUID
 
@@ -29,6 +31,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from openhands.app_server.config import (
     depends_app_conversation_info_service,
@@ -44,6 +47,7 @@ from openhands.app_server.sandbox.sandbox_service import (
     SandboxService,
     get_sandbox_startup_timeout,
 )
+from openhands.app_server.settings.llm_profiles import StrictLLM
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
@@ -549,7 +553,7 @@ async def get_secret_value(name: str, request: Request):
     if secrets and secrets.custom_secrets:
         source = secrets.custom_secrets.get(name)
         if source is not None:
-            value = source.get_value()
+            value = source.secret.get_secret_value() or None
             if value is None:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND, detail='Secret has no value'
@@ -619,7 +623,7 @@ async def delete_secret(name: str, request: Request):
     user_auth = await get_user_auth(request)
     secrets_store = await user_auth.get_secrets_store()
     if secrets_store is None:
-        return {'message': 'Secret deleted successfully'}
+        return {'message': 'Secret deleted successfully'}  # type: ignore[unreachable]
     existing = await secrets_store.load()
     if existing and existing.custom_secrets and name in existing.custom_secrets:
         custom_secrets = dict(existing.custom_secrets)
@@ -678,6 +682,271 @@ async def list_verified_models():
 
 
 # ---------------------------------------------------------------------------
+# Provider connections — shared LLM credentials referenced by profiles
+# ---------------------------------------------------------------------------
+
+
+class ProviderConnectionCreateRequest(BaseModel):
+    """Create body: display name, provider, and key are all required."""
+
+    display_name: str = Field(min_length=1, max_length=128)
+    provider: str = Field(min_length=1, max_length=128)
+    api_key: SecretStr = Field(min_length=1)
+    base_url: str | None = Field(default=None, max_length=2048)
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ProviderConnectionUpdateRequest(BaseModel):
+    """Partial update: only the provided fields change."""
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    api_key: SecretStr | None = None
+    base_url: str | None = Field(default=None, max_length=2048)
+
+    model_config = ConfigDict(extra='forbid')
+
+    @model_validator(mode='after')
+    def _reject_null_required_fields(self):
+        # Only ``base_url`` may be cleared with null. Accepting null for
+        # ``display_name``/``provider`` would persist a null that poisons
+        # every subsequent store read.
+        for field in ('display_name', 'provider'):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f'{field} cannot be set to null')
+        return self
+
+
+def _provider_connection_store(settings_store):
+    """Resolve the SDK provider-connection store for this user.
+
+    Co-located with the user's ``settings.json`` so file-backed test stores
+    stay isolated per test; falls back to the SDK default directory when the
+    settings store is not file-backed. Secrets persist in plaintext, matching
+    the shim's ``settings.json`` handling.
+    """
+    from openhands.sdk.llm.provider_connection_store import ProviderConnectionStore
+
+    base_dir = None
+    root = getattr(getattr(settings_store, 'file_store', None), 'root', None)
+    if isinstance(root, str) and root:
+        base_dir = root
+    return ProviderConnectionStore(base_dir=base_dir)
+
+
+def _provider_connection_response(connection) -> dict[str, Any]:
+    return {
+        'id': connection.id,
+        'display_name': connection.display_name,
+        'provider': connection.provider,
+        'base_url': connection.base_url,
+        'created_at': connection.created_at,
+        'updated_at': connection.updated_at,
+        'api_key_set': connection.api_key_value() is not None,
+    }
+
+
+def _provider_connection_keys(settings_store) -> dict[str, bool] | None:
+    """Map connection id → key presence, or None when unreadable."""
+    try:
+        connections = _provider_connection_store(settings_store).list()
+    except Exception:
+        return None
+    return {c.id: c.api_key_value() is not None for c in connections}
+
+
+@_local_protocol_router.get(
+    '/api/llm/provider-connections', dependencies=[Depends(_require_global_auth)]
+)
+async def list_provider_connections(request: Request):
+    from openhands.app_server.user_auth import get_user_auth
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    try:
+        connections = _provider_connection_store(settings_store).list()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to read provider connections',
+        )
+    return [_provider_connection_response(c) for c in connections]
+
+
+@_local_protocol_router.post(
+    '/api/llm/provider-connections',
+    dependencies=[Depends(_require_global_auth)],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_provider_connection(
+    request: Request, body: ProviderConnectionCreateRequest
+):
+    from openhands.app_server.user_auth import get_user_auth
+    from openhands.sdk.llm.provider_connection_store import (
+        ProviderConnection,
+        ProviderConnectionLimitExceeded,
+    )
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    now = int(time.time())
+    connection = ProviderConnection(
+        id=uuid.uuid4().hex,
+        display_name=body.display_name,
+        provider=body.provider,
+        api_key=body.api_key,
+        base_url=body.base_url,
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        _provider_connection_store(settings_store).create(connection)
+    except ProviderConnectionLimitExceeded as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'{exc} Delete one before adding another.',
+        )
+    return _provider_connection_response(connection)
+
+
+@_local_protocol_router.patch(
+    '/api/llm/provider-connections/{connection_id}',
+    dependencies=[Depends(_require_global_auth)],
+)
+async def update_provider_connection(
+    connection_id: str, request: Request, body: ProviderConnectionUpdateRequest
+):
+    from openhands.app_server.user_auth import get_user_auth
+    from openhands.sdk.llm.provider_connection_store import ProviderConnectionNotFound
+
+    fields = body.model_fields_set
+    if not fields:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='Provide at least one provider connection field to update',
+        )
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    store = _provider_connection_store(settings_store)
+    try:
+        connection = store.get(connection_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to read provider connections',
+        )
+    if connection is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Provider connection '{connection_id}' not found",
+        )
+    # A connection must always have a key, so clearing it is not a valid
+    # update. Reject api_key: null explicitly instead of silently dropping it.
+    if 'api_key' in fields and body.api_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='api_key cannot be cleared; provide a new key to rotate it',
+        )
+    updates: dict[str, Any] = {'updated_at': int(time.time())}
+    for field in ('display_name', 'provider', 'base_url'):
+        if field in fields:
+            updates[field] = getattr(body, field)
+    if 'api_key' in fields:
+        updates['api_key'] = body.api_key
+    updated = connection.model_copy(update=updates)
+    try:
+        store.update(updated)
+    except ProviderConnectionNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Provider connection '{connection_id}' not found",
+        )
+    return _provider_connection_response(updated)
+
+
+@_local_protocol_router.delete(
+    '/api/llm/provider-connections/{connection_id}',
+    dependencies=[Depends(_require_global_auth)],
+)
+async def delete_provider_connection(connection_id: str, request: Request):
+    from openhands.app_server.user_auth import get_user_auth
+    from openhands.sdk.llm.provider_connection_store import ProviderConnectionNotFound
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    store = _provider_connection_store(settings_store)
+    try:
+        connection = store.get(connection_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to read provider connections',
+        )
+    if connection is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Provider connection '{connection_id}' not found",
+        )
+    settings = await user_auth.get_user_settings()
+    profiles = settings.llm_profiles.profiles if settings is not None else {}
+    profile_names = sorted(
+        name
+        for name, llm in profiles.items()
+        if getattr(llm, 'provider_connection_id', None) == connection_id
+    )
+    active_reference = (
+        settings is not None
+        and getattr(settings.agent_settings.llm, 'provider_connection_id', None)
+        == connection_id
+    )
+    if profile_names or active_reference:
+        reasons = []
+        if profile_names:
+            reasons.append(f'referenced by LLM profile(s): {", ".join(profile_names)}')
+        if active_reference:
+            reasons.append('referenced by the active agent settings')
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                'Provider connection cannot be deleted while it is '
+                + ' and '.join(reasons)
+                + '. Update those references before deleting it.'
+            ),
+        )
+    try:
+        store.delete(connection_id)
+    except ProviderConnectionNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Provider connection '{connection_id}' not found",
+        )
+    response = _provider_connection_response(connection)
+    response['api_key_set'] = False
+    return response
+
+
+# ---------------------------------------------------------------------------
 # Profiles — map to /api/v1/settings/profiles* handlers
 # ---------------------------------------------------------------------------
 
@@ -694,9 +963,17 @@ async def list_profiles(request: Request):
         return {'profiles': [], 'active_profile': None}
     from openhands.app_server.settings.settings_router import LITE_LLM_API_URL
 
+    settings_store = await user_auth.get_user_settings_store()
+    keys = (
+        _provider_connection_keys(settings_store)
+        if settings_store is not None
+        else None
+    )
     profiles = [
         dict(p)
-        for p in settings.llm_profiles.summaries(managed_proxy_url=LITE_LLM_API_URL)
+        for p in settings.llm_profiles.summaries(
+            managed_proxy_url=LITE_LLM_API_URL, provider_connection_keys=keys
+        )
     ]
     return {'profiles': profiles, 'active_profile': settings.llm_profiles.active}
 
@@ -722,6 +999,21 @@ async def get_profile(name: str, request: Request):
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Profile '{name}' not found"
         )
     api_key_set = has_real_api_key(profile.api_key)
+    connection_id = getattr(profile, 'provider_connection_id', None)
+    if not api_key_set and connection_id:
+        # A linked profile carries no inline key; its effective key presence
+        # lives on the connection.
+        settings_store = await user_auth.get_user_settings_store()
+        if settings_store is not None:
+            try:
+                connection = _provider_connection_store(settings_store).get(
+                    connection_id
+                )
+            except Exception:
+                connection = None
+            api_key_set = (
+                connection is not None and connection.api_key_value() is not None
+            )
     expose_mode = parse_expose_secrets_header(request)
     if expose_mode is None:
         config = profile.model_dump(mode='json')
@@ -747,7 +1039,7 @@ async def get_profile(name: str, request: Request):
     '/api/profiles/{name}', dependencies=[Depends(_require_global_auth)]
 )
 async def save_profile(
-    name: str, request: Request, payload: dict[str, Any] = Body(default=None)
+    name: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
 ):
     from openhands.app_server.user_auth import get_user_auth
 
@@ -757,7 +1049,7 @@ async def save_profile(
     settings_store = await user_auth.get_user_settings_store()
     user_id = await user_auth.get_user_id()
     if settings_store is None:
-        raise HTTPException(
+        raise HTTPException(  # type: ignore[unreachable]
             status_code=status.HTTP_404_NOT_FOUND, detail='Settings not found'
         )
     # Reuse the v1 handler's logic inline
@@ -917,6 +1209,63 @@ async def rename_profile(
             settings.title_llm_profile = new_name
         await settings_store.store(settings)
     return {'name': new_name, 'message': f"Profile '{name}' renamed to '{new_name}'"}
+
+
+class ValidateProfileRequest(BaseModel):
+    """Pre-flight body: the draft LLM config, same shape as the save body."""
+
+    llm: StrictLLM
+
+
+@_local_protocol_router.post(
+    '/api/profiles/{name}/validate', dependencies=[Depends(_require_global_auth)]
+)
+async def validate_profile(name: str, body: ValidateProfileRequest):
+    """Pre-flight check: fire a minimal LLM completion to catch a
+    misconfigured profile before it is saved.
+
+    Returns ``{valid: True}`` when the LLM responds, or ``{valid: False,
+    error: {type, message}}`` on a blocking error. Transient errors (rate
+    limits, timeouts) are non-blocking. Older frontends treat a missing route
+    (404) as "no verdict", so this shape stays a plain ``{valid, error}``
+    dict.
+    """
+    from openhands.sdk.llm import Message, TextContent
+    from openhands.sdk.llm.exceptions import (
+        LLMError,
+        LLMRateLimitError,
+        LLMServiceUnavailableError,
+        LLMTimeoutError,
+    )
+    from openhands.sdk.utils.redact import redact_text_secrets
+
+    llm = body.llm
+    messages = [Message(role='user', content=[TextContent(text='ping')])]
+    try:
+        # Mirror the runtime dispatch and stay async so provider I/O doesn't
+        # pin the FastAPI event loop.
+        if llm.uses_responses_api():
+            await llm.aresponses(messages=messages, max_tokens=1)
+        else:
+            await llm.acompletion(messages=messages, max_tokens=1)
+    except (LLMRateLimitError, LLMTimeoutError):
+        # Transient — don't block the save
+        return {'valid': True, 'error': None}
+    except (LLMServiceUnavailableError, LLMError) as exc:
+        return {
+            'valid': False,
+            'error': {
+                'type': type(exc).__name__,
+                'message': redact_text_secrets(exc.message),
+            },
+        }
+    except Exception as exc:
+        message = redact_text_secrets(str(exc) or type(exc).__name__)
+        return {
+            'valid': False,
+            'error': {'type': type(exc).__name__, 'message': message},
+        }
+    return {'valid': True, 'error': None}
 
 
 # ---------------------------------------------------------------------------
@@ -1290,7 +1639,7 @@ async def create_conversation(
         conv_id_raw = data.get('id')
         if conv_id_raw:
             try:
-                conv_uuid = UUID(str(conv_id_raw))
+                conv_uuid: UUID | None = UUID(str(conv_id_raw))
             except ValueError:
                 conv_uuid = (
                     UUID(conv_id_raw.replace('-', ''))
@@ -1402,6 +1751,10 @@ async def _proxy_to_sandbox_by_path(
     if sandbox.status == SandboxStatus.PAUSED:
         await sandbox_service.resume_sandbox(sandbox_id)
         sandbox = await sandbox_service.get_sandbox(sandbox_id)
+        if not sandbox:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail='Sandbox not found'
+            )
     agent_url = _get_agent_server_url_from_sandbox(sandbox)
     if not agent_url:
         raise HTTPException(

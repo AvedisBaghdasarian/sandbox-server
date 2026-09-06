@@ -1,6 +1,6 @@
-'''Unit tests for local-protocol pure helpers.'''
+"""Unit tests for local-protocol pure helpers."""
 
-import pytest
+from urllib.parse import urlparse
 
 from openhands.app_server.local_protocol.helpers import (
     WorkingDirIndex,
@@ -27,9 +27,37 @@ class TestRewriteConversationUrl:
         url = rewrite_conversation_url('http://host:3000/', '/sid/', '/cid/')
         assert url == 'http://host:3000/runtime/sid/api/conversations/cid'
 
+    def test_preserves_mount_prefix(self):
+        url = rewrite_conversation_url('http://host/sandbox-server', 'sid', 'cid')
+        assert url == 'http://host/sandbox-server/runtime/sid/api/conversations/cid'
+
+    def test_preserves_mount_prefix_with_trailing_slash(self):
+        url = rewrite_conversation_url('http://host/sandbox-server/', 'sid', 'cid')
+        assert url == 'http://host/sandbox-server/runtime/sid/api/conversations/cid'
+
+    def test_derived_socket_urls_land_under_runtime_prefix(self):
+        # Mirrors src/utils/websocket-url.ts: extractPathPrefix splits on
+        # '/api/conversations'; both socket builders append under that prefix.
+        for external_base in ('http://host:3000', 'http://host/sandbox-server'):
+            url = rewrite_conversation_url(external_base, 'sid', 'cid')
+            prefix = urlparse(url).path.split('/api/conversations')[0]
+            assert prefix.endswith('/runtime/sid')
+            assert f'{prefix}/sockets/events/cid'.endswith(
+                '/runtime/sid/sockets/events/cid'
+            )
+            assert f'{prefix}/sockets/bash-events'.endswith(
+                '/runtime/sid/sockets/bash-events'
+            )
+
     def test_external_base_helper(self):
-        assert external_base_from_request_base_url('http://localhost:3000/') == 'http://localhost:3000'
-        assert external_base_from_request_base_url('http://example.com/base/') == 'http://example.com/base'
+        assert (
+            external_base_from_request_base_url('http://localhost:3000/')
+            == 'http://localhost:3000'
+        )
+        assert (
+            external_base_from_request_base_url('http://example.com/base/')
+            == 'http://example.com/base'
+        )
 
 
 class TestWorkingDirIndex:

@@ -200,9 +200,15 @@ class LLMProfiles(BaseModel):
         return name in self.profiles
 
     def summaries(
-        self, *, managed_proxy_url: str | None = None
+        self,
+        *,
+        managed_proxy_url: str | None = None,
+        provider_connection_keys: dict[str, bool] | None = None,
     ) -> list[dict[str, Any]]:
-        """Return a ``{name, model, base_url, api_key_set}`` dict per profile.
+        """Return a profile summary dict per profile.
+
+        Each dict carries ``{name, model, base_url, api_key_set,
+        provider_connection_id, provider_connection_broken}``.
 
         ``api_key_set`` mirrors the ``llm_api_key_set`` convention the main
         settings endpoint already uses, so the frontend can render
@@ -211,22 +217,44 @@ class LLMProfiles(BaseModel):
         When ``managed_proxy_url`` is provided, ``base_url`` is resolved to the
         value the profile will actually use at runtime for public OpenHands
         provider profiles.
+
+        When ``provider_connection_keys`` (``{connection_id: api_key_set}``)
+        is provided, a linked profile reports its *effective* key presence
+        (inline key or the connection's key) and ``provider_connection_broken``
+        is True when the linked connection no longer exists. Without it,
+        ``provider_connection_broken`` is always False.
         """
-        return [
-            {
-                'name': name,
-                'model': llm.model,
-                'base_url': (
-                    resolve_llm_base_url(
-                        llm.model, llm.base_url, managed_proxy_url=managed_proxy_url
-                    )
-                    if managed_proxy_url is not None
-                    else llm.base_url
-                ),
-                'api_key_set': has_real_api_key(llm.api_key),
-            }
-            for name, llm in self.profiles.items()
-        ]
+        rows: list[dict[str, Any]] = []
+        for name, llm in self.profiles.items():
+            connection_id = getattr(llm, 'provider_connection_id', None)
+            api_key_set = has_real_api_key(llm.api_key)
+            broken = False
+            if connection_id:
+                if provider_connection_keys is None:
+                    broken = False
+                elif connection_id not in provider_connection_keys:
+                    broken = True
+                elif not api_key_set:
+                    api_key_set = provider_connection_keys[connection_id]
+            rows.append(
+                {
+                    'name': name,
+                    'model': llm.model,
+                    'base_url': (
+                        resolve_llm_base_url(
+                            llm.model,
+                            llm.base_url,
+                            managed_proxy_url=managed_proxy_url,
+                        )
+                        if managed_proxy_url is not None
+                        else llm.base_url
+                    ),
+                    'api_key_set': api_key_set,
+                    'provider_connection_id': connection_id,
+                    'provider_connection_broken': broken,
+                }
+            )
+        return rows
 
     # ── Mutations ──────────────────────────────────────────────────
 
@@ -240,6 +268,13 @@ class LLMProfiles(BaseModel):
         """
         if name not in self.profiles and len(self.profiles) >= MAX_PROFILES_PER_USER:
             raise ProfileLimitExceededError(MAX_PROFILES_PER_USER)
+
+        if getattr(llm, 'provider_connection_id', None):
+            # A linked profile owns no inline credentials — the connection is
+            # the single source of truth, so clear any api_key / base_url
+            # before persisting to avoid a stale copy disagreeing with the
+            # connection (mirrors the upstream profile store).
+            llm = llm.model_copy(update={'api_key': None, 'base_url': None})
 
         update = {} if include_secrets else {'api_key': None}
         self.profiles[name] = llm.model_copy(update=update)

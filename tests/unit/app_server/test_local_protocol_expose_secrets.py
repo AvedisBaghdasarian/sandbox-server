@@ -4,7 +4,7 @@ from pydantic import SecretStr
 
 from openhands.agent_server._secrets_exposure import build_expose_context
 from openhands.sdk.llm import LLM
-from openhands.sdk.utils.cipher import Cipher, FERNET_TOKEN_PREFIX
+from openhands.sdk.utils.cipher import FERNET_TOKEN_PREFIX, Cipher
 from openhands.sdk.utils.pydantic_secrets import REDACTED_SECRET_VALUE
 
 
@@ -181,7 +181,8 @@ class TestLocalProtocolSettingsEndpoint:
             ),
         )
         settings.llm_profiles.save(
-            'my-profile', LLM(model='openai/gpt-4o', api_key=SecretStr('sk-profile-secret'))
+            'my-profile',
+            LLM(model='openai/gpt-4o', api_key=SecretStr('sk-profile-secret')),
         )
 
         class MockAuth:
@@ -227,7 +228,10 @@ class TestLocalProtocolSettingsEndpoint:
         assert resp_enc.status_code == 200
         assert resp_enc.json()['config']['api_key'].startswith('gAAAAA')
         cipher = Cipher('test-secret-key-12345')
-        assert cipher.decrypt(resp_enc.json()['config']['api_key']).get_secret_value() == 'sk-profile-secret'
+        assert (
+            cipher.decrypt(resp_enc.json()['config']['api_key']).get_secret_value()
+            == 'sk-profile-secret'
+        )
         assert resp_pt.json()['config']['api_key'] == 'sk-profile-secret'
 
     def test_get_settings_encrypted_without_key_returns_503(self, monkeypatch):
@@ -278,7 +282,9 @@ class TestLocalProtocolSettingsEndpoint:
                 AsyncMock(return_value=mock_auth),
             )
             client = TestClient(app)
-            resp = client.get('/api/settings', headers={'X-Expose-Secrets': 'encrypted'})
+            resp = client.get(
+                '/api/settings', headers={'X-Expose-Secrets': 'encrypted'}
+            )
 
         # Assert
         assert resp.status_code == 503

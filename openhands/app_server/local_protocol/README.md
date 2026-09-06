@@ -31,12 +31,12 @@ local_protocol router (mounted at "/")
    │     GET /api/conversations, /api/conversations/search, /api/conversations/{id}
    │     DELETE /api/conversations/{id}
    │
-   └── conversation-scoped runtime: PROXY to the sandbox's agent-server
-         /api/conversations/{id}/events (GET/search/count, POST = send message)
-         /api/conversations/{id}/git/changes, /git/diff
-         /api/conversations/{id}/file...
-         /sockets/events/{conversation_id}      (WebSocket bridge)
-         /sockets/bash-events                   (WebSocket bridge)
+    └── conversation-scoped runtime: PROXY to the sandbox's agent-server
+          /api/conversations/{id}/events (GET/search/count, POST = send message)
+          /api/conversations/{id}/git/changes, /git/diff
+          /api/conversations/{id}/file...
+          /runtime/{sandbox_id}/sockets/events/{conversation_id}      (WebSocket bridge)
+          /runtime/{sandbox_id}/sockets/bash-events                   (WebSocket bridge)
 ```
 
 ## Core rule: conversation_url rewriting
@@ -46,15 +46,20 @@ and a per-sandbox `session_api_key`. The adapter MUST rewrite every
 `conversation_url` it returns to the browser to point at THIS origin:
 
 ```
-<external base>/api/conversations/{id.hex}
+<external base>/runtime/{sandbox_id}/api/conversations/{id.hex}
 ```
 
 where `<external base>` is the adapter's externally-reachable base URL
-(derived from the request host / config, e.g. `http://<host>:3000`). The
-`session_api_key` is passed through unchanged — the adapter uses it as
+(derived from the request host / config, e.g. `http://<host>:3000`), preserving
+any public mount prefix already in the base (e.g. `http://<host>/sandbox-server`
+yields `http://<host>/sandbox-server/runtime/{sandbox_id}/api/conversations/{id.hex}`).
+The `session_api_key` is passed through unchanged — the adapter uses it as
 `X-Session-API-Key` when proxying to the sandbox. agent-canvas derives its REST
-base and its WebSocket URL (`/sockets/events/{id}`) from `conversation_url`, so
-rewriting it to this origin is what keeps the browser on the single origin.
+base and its WebSocket URLs (`/runtime/{sandbox_id}/sockets/events/{id}`,
+`/runtime/{sandbox_id}/sockets/bash-events`) from `conversation_url` via its
+path-prefix split on `/api/conversations`, so carrying the sandbox routing in
+`conversation_url` is what keeps the browser on the single origin with no
+frontend change. No direct (non-`/runtime`) `/sockets/*` routes exist.
 
 ## Conversation -> sandbox resolution
 
@@ -85,7 +90,9 @@ before auth is known, mirroring the modern agent-server which leaves
 | `GET /api/settings/agent-schema`, `conversation-schema` | Proxy to `/api/v1/settings/agent-schema` / `conversation-schema`. |
 | `GET /api/settings/secrets`, `GET /api/settings/secrets/{name}`, `PUT /api/settings/secrets`, `DELETE /api/settings/secrets/{name}` | Map to `/api/v1/secrets` (search/create), `PUT /api/v1/secrets/{id}`, `DELETE /api/v1/secrets/{id}`. |
 | `GET /api/llm/providers`, `GET /api/llm/models`, `GET /api/llm/models/verified` | Map to `/api/v1/config/providers/search` and `/api/v1/config/models/search`. |
-| `GET/POST/DELETE /api/profiles/{name}`, `/api/profiles` | Map to `/api/v1/settings/profiles*`. |
+| `GET/POST /api/llm/provider-connections`, `PATCH/DELETE /api/llm/provider-connections/{id}` | Shared LLM credentials referenced by profiles (`provider_connection_id`); stored co-located with `settings.json` via the SDK `ProviderConnectionStore`. Delete is guarded with 409 while any profile or the active settings still reference the connection. |
+| `GET/POST/DELETE /api/profiles/{name}`, `/api/profiles` | Map to `/api/v1/settings/profiles*`. Summaries carry `provider_connection_id` / `provider_connection_broken`; saving a linked profile clears its inline `api_key` / `base_url`. |
+| `POST /api/profiles/{name}/validate` | Pre-flight check: fires a 1-token completion against the draft LLM config; returns `{valid, error}`. Transient errors (rate limits, timeouts) are non-blocking (`valid: true`). |
 | `POST /api/conversations` | Start via app_server conversation service; poll until READY; return local `ConversationInfo` with rewritten `conversation_url`. |
 | `GET /api/conversations`, `GET /api/conversations/search`, `GET /api/conversations/{id}`, `DELETE /api/conversations/{id}` | Map to `/api/v1/app-conversations*`, rewriting `conversation_url`. |
 | `GET /api/conversations/{id}/events/search`, `/events/count`, `GET /api/conversations/{id}/events` | Proxy to the sandbox agent-server. |
@@ -93,8 +100,8 @@ before auth is known, mirroring the modern agent-server which leaves
 | `GET /api/conversations/{id}/git/changes`, `/git/diff` | Proxy to sandbox agent-server. |
 | `GET /api/file/home`, file endpoints | Proxy to sandbox agent-server. |
 | `GET /api/skills/search`, MCP endpoints | Map from `/api/v1/skills*` / MCP router. |
-| WS `/sockets/events/{conversation_id}` | Bridge to sandbox agent-server WS at `{sandbox-base}/sockets/events/{conversation_id}` with the sandbox session key. |
-| WS `/sockets/bash-events` | Bridge to sandbox agent-server WS at `{sandbox-base}/sockets/bash-events`. |
+| WS `/runtime/{sandbox_id}/sockets/events/{conversation_id}` | Bridge to sandbox agent-server WS at `{sandbox-base}/sockets/events/{conversation_id}` with the sandbox session key. |
+| WS `/runtime/{sandbox_id}/sockets/bash-events` | Bridge to sandbox agent-server WS at `{sandbox-base}/sockets/bash-events`. |
 
 ## Testing
 

@@ -12,16 +12,25 @@ class TestBuildUpstreamWsUrl:
 
     def test_with_query(self):
         url = build_upstream_ws_url(
-            'http://localhost:18000', '/sockets/events/abc', 'resend_mode=since&after_timestamp=123'
+            'http://localhost:18000',
+            '/sockets/events/abc',
+            'resend_mode=since&after_timestamp=123',
         )
-        assert url == 'http://localhost:18000/sockets/events/abc?resend_mode=since&after_timestamp=123'
+        assert (
+            url
+            == 'http://localhost:18000/sockets/events/abc?resend_mode=since&after_timestamp=123'
+        )
 
     def test_strips_trailing_slash(self):
-        url = build_upstream_ws_url('http://localhost:18000/', '/sockets/bash-events', '')
+        url = build_upstream_ws_url(
+            'http://localhost:18000/', '/sockets/bash-events', ''
+        )
         assert url == 'http://localhost:18000/sockets/bash-events'
 
     def test_bash_events_with_query(self):
-        url = build_upstream_ws_url('http://localhost:18000', '/sockets/bash-events', 'foo=bar')
+        url = build_upstream_ws_url(
+            'http://localhost:18000', '/sockets/bash-events', 'foo=bar'
+        )
         assert url == 'http://localhost:18000/sockets/bash-events?foo=bar'
 
 

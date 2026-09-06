@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 
 from openhands.app_server.status import system_stats
 from openhands.app_server.status.status_router import router
-from openhands.app_server.version import get_version
 
 
 @pytest.fixture
