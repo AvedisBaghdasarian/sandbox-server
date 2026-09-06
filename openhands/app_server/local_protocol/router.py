@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import json
 import os
 import time
 import uuid
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 import httpx
@@ -23,6 +24,7 @@ from fastapi import (
     Body,
     Depends,
     HTTPException,
+    Path,
     Query,
     Request,
     Response,
@@ -47,10 +49,15 @@ from openhands.app_server.sandbox.sandbox_service import (
     SandboxService,
     get_sandbox_startup_timeout,
 )
+from openhands.app_server.settings.agent_profiles import (
+    MAX_AGENT_PROFILES,
+    AgentProfiles,
+)
 from openhands.app_server.settings.llm_profiles import StrictLLM
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
+from openhands.sdk.profiles.agent_profile_store import PROFILE_NAME_PATTERN
 
 from .helpers import (
     WorkingDirIndex,
@@ -1266,6 +1273,327 @@ async def validate_profile(name: str, body: ValidateProfileRequest):
             'error': {'type': type(exc).__name__, 'message': message},
         }
     return {'valid': True, 'error': None}
+
+
+# ---------------------------------------------------------------------------
+# Agent profiles — named launch specs (agent-canvas GET /api/agent-profiles)
+# ---------------------------------------------------------------------------
+
+
+AgentProfileName = Annotated[
+    str,
+    Path(min_length=1, max_length=64, pattern=PROFILE_NAME_PATTERN),
+]
+AgentProfileId = Annotated[str, Path(min_length=1, max_length=128)]
+
+_AGENT_PROFILES_FILENAME = 'agent_profiles.json'
+
+
+class RenameAgentProfileRequest(BaseModel):
+    new_name: str = Field(min_length=1, max_length=64, pattern=PROFILE_NAME_PATTERN)
+
+
+def _load_agent_profiles(settings_store) -> AgentProfiles:
+    """Read the ``AgentProfiles`` store co-located with ``settings.json``.
+
+    File-backed test stores stay isolated per test because the file lives
+    next to that test's ``settings.json``. A missing or unreadable file
+    yields an empty store; only an I/O failure mid-read is a 500.
+    """
+    file_store = getattr(settings_store, 'file_store', None)
+    if file_store is None:
+        return AgentProfiles()
+    try:
+        raw = file_store.read(_AGENT_PROFILES_FILENAME)
+    except FileNotFoundError:
+        return AgentProfiles()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to read agent profiles',
+        )
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return AgentProfiles()
+    try:
+        return AgentProfiles.model_validate(data)
+    except Exception:
+        return AgentProfiles()
+
+
+def _save_agent_profiles(settings_store, profiles: AgentProfiles) -> None:
+    file_store = getattr(settings_store, 'file_store', None)
+    if file_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    try:
+        payload = json.dumps(profiles.model_dump(mode='json'), indent=2)
+        file_store.write(_AGENT_PROFILES_FILENAME, payload)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to store agent profiles',
+        )
+
+
+class _AgentProfileLLMLoader:
+    """Minimal ``LLMProfileLoader`` over the local ``LLMProfiles`` container."""
+
+    def __init__(self, settings) -> None:
+        self._settings = settings
+
+    def load(self, name: str, *, cipher=None):
+        profile = (
+            self._settings.llm_profiles.get(name)
+            if self._settings is not None
+            else None
+        )
+        if profile is None:
+            raise FileNotFoundError(f"LLM profile '{name}' not found")
+        return profile
+
+
+async def _load_settings_or_default(user_auth):
+    from openhands.app_server.settings.settings_models import Settings
+
+    settings = await user_auth.get_user_settings()
+    return settings if settings is not None else Settings()
+
+
+@_local_protocol_router.get(
+    '/api/agent-profiles', dependencies=[Depends(_require_global_auth)]
+)
+async def list_agent_profiles(request: Request):
+    from openhands.app_server.user_auth import get_user_auth
+    from openhands.sdk.profiles import (
+        build_seed_profile,
+        save_profile_preserving_identity,
+    )
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    settings = await _load_settings_or_default(user_auth)
+    store = _load_agent_profiles(settings_store)
+    if not store.list() and store.active is None:
+        profile = build_seed_profile(
+            settings.agent_settings, settings.llm_profiles.active
+        )
+        saved = save_profile_preserving_identity(
+            store, profile, max_profiles=MAX_AGENT_PROFILES
+        )
+        store.active = str(saved.id)
+        _save_agent_profiles(settings_store, store)
+    return {
+        'profiles': store.list_summaries(),
+        'active_agent_profile_id': store.active,
+    }
+
+
+@_local_protocol_router.get(
+    '/api/agent-profiles/{name}', dependencies=[Depends(_require_global_auth)]
+)
+async def get_agent_profile(name: AgentProfileName, request: Request):
+    from openhands.app_server.user_auth import get_user_auth
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    store = _load_agent_profiles(settings_store)
+    try:
+        profile = store.load(name)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent profile '{name}' not found",
+        )
+    return {'name': name, 'profile': profile.model_dump(mode='json')}
+
+
+@_local_protocol_router.post(
+    '/api/agent-profiles/{name}',
+    dependencies=[Depends(_require_global_auth)],
+    status_code=status.HTTP_201_CREATED,
+)
+async def save_agent_profile(
+    name: AgentProfileName, request: Request, body: dict[str, Any] = Body(...)
+):
+    from pydantic import ValidationError
+
+    from openhands.app_server.user_auth import get_user_auth
+    from openhands.sdk.profiles import (
+        safe_validation_error_detail,
+        save_profile_preserving_identity,
+        validate_agent_profile,
+    )
+    from openhands.sdk.profiles.agent_profile_store import ProfileLimitExceeded
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    try:
+        profile = validate_agent_profile({**body, 'name': name})
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=safe_validation_error_detail(e),
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='Invalid agent profile',
+        )
+    store = _load_agent_profiles(settings_store)
+    try:
+        save_profile_preserving_identity(
+            store, profile, max_profiles=MAX_AGENT_PROFILES
+        )
+    except ProfileLimitExceeded:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f'Agent profile limit reached ({MAX_AGENT_PROFILES}). '
+                'Delete a profile before saving a new one.'
+            ),
+        )
+    _save_agent_profiles(settings_store, store)
+    return {'name': name, 'message': f"Agent profile '{name}' saved"}
+
+
+@_local_protocol_router.delete(
+    '/api/agent-profiles/{name}', dependencies=[Depends(_require_global_auth)]
+)
+async def delete_agent_profile(name: AgentProfileName, request: Request):
+    from openhands.app_server.user_auth import get_user_auth
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    store = _load_agent_profiles(settings_store)
+    store.delete(name)
+    _save_agent_profiles(settings_store, store)
+    return {'name': name, 'message': f"Agent profile '{name}' deleted"}
+
+
+@_local_protocol_router.post(
+    '/api/agent-profiles/{name}/rename', dependencies=[Depends(_require_global_auth)]
+)
+async def rename_agent_profile(
+    name: AgentProfileName, request: Request, body: RenameAgentProfileRequest
+):
+    from openhands.app_server.user_auth import get_user_auth
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    store = _load_agent_profiles(settings_store)
+    try:
+        store.rename(name, body.new_name)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent profile '{name}' not found",
+        )
+    except FileExistsError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Agent profile '{body.new_name}' already exists",
+        )
+    _save_agent_profiles(settings_store, store)
+    if name == body.new_name:
+        message = f"Agent profile '{name}' unchanged (same name)"
+    else:
+        message = f"Agent profile '{name}' renamed to '{body.new_name}'"
+    return {'name': body.new_name, 'message': message}
+
+
+@_local_protocol_router.post(
+    '/api/agent-profiles/{profile_id}/activate',
+    dependencies=[Depends(_require_global_auth)],
+)
+async def activate_agent_profile(profile_id: AgentProfileId, request: Request):
+    from openhands.app_server.user_auth import get_user_auth
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    store = _load_agent_profiles(settings_store)
+    known_ids = {
+        str(s['id']) for s in store.list_summaries() if s.get('id') is not None
+    }
+    if profile_id not in known_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent profile with id '{profile_id}' not found",
+        )
+    store.active = profile_id
+    _save_agent_profiles(settings_store, store)
+    return {
+        'id': profile_id,
+        'message': f"Agent profile '{profile_id}' activated",
+        'agent_settings_applied': False,
+    }
+
+
+@_local_protocol_router.post(
+    '/api/agent-profiles/{name}/materialize',
+    dependencies=[Depends(_require_global_auth)],
+)
+async def materialize_agent_profile(name: AgentProfileName, request: Request):
+    from openhands.app_server.user_auth import get_user_auth
+    from openhands.sdk.profiles import resolve_agent_profile_dry_run
+
+    user_auth = await get_user_auth(request)
+    settings_store = await user_auth.get_user_settings_store()
+    if settings_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Settings store not available',
+        )
+    store = _load_agent_profiles(settings_store)
+    try:
+        profile = store.load(name)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent profile '{name}' not found",
+        )
+    settings = await _load_settings_or_default(user_auth)
+    diagnostics = resolve_agent_profile_dry_run(
+        profile,
+        llm_store=_AgentProfileLLMLoader(settings),
+        mcp_config=settings.agent_settings.mcp_config,
+        available_skills=None,
+        cipher=None,
+    )
+    return diagnostics.model_dump(mode='json')
 
 
 # ---------------------------------------------------------------------------
