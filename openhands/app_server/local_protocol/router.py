@@ -1261,7 +1261,7 @@ class ValidateProfileRequest(BaseModel):
 @_local_protocol_router.post(
     '/api/profiles/{name}/validate', dependencies=[Depends(_require_global_auth)]
 )
-async def validate_profile(name: str, body: ValidateProfileRequest):
+async def validate_profile(name: str, body: ValidateProfileRequest, request: Request):
     """Pre-flight check: fire a minimal LLM completion to catch a
     misconfigured profile before it is saved.
 
@@ -1281,6 +1281,19 @@ async def validate_profile(name: str, body: ValidateProfileRequest):
     from openhands.sdk.utils.redact import redact_text_secrets
 
     llm = body.llm
+    # A linked draft carries only provider_connection_id — resolve it into
+    # inline credentials first, or the ping always fails auth client-side.
+    try:
+        from openhands.app_server.user_auth import get_user_auth as _get_user_auth
+
+        _user_auth = await _get_user_auth(request)
+        _settings_store = await _user_auth.get_user_settings_store()
+        llm_dict = llm.model_dump(mode='json')
+        resolved_dict = _materialize_llm_provider_connection(llm_dict, _settings_store)
+        if resolved_dict is not llm_dict:
+            llm = StrictLLM.model_validate(resolved_dict)
+    except Exception:
+        pass
     messages = [Message(role='user', content=[TextContent(text='ping')])]
     try:
         # Mirror the runtime dispatch and stay async so provider I/O doesn't
