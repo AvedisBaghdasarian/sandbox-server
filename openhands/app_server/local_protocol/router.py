@@ -763,6 +763,40 @@ def _provider_connection_keys(settings_store) -> dict[str, bool] | None:
     return {c.id: c.api_key_value() is not None for c in connections}
 
 
+def _materialize_llm_provider_connection(
+    llm_dict: dict[str, Any], settings_store
+) -> dict[str, Any]:
+    """Resolve a linked provider connection into inline credentials.
+
+    The shim owns the connection store, but each sandbox container runs its
+    own agent-server with an empty store. Forwarding a bare
+    ``provider_connection_id`` would leave the sandbox nothing to resolve, so
+    copy the connection's key/base_url inline and drop the id. Returns a new
+    dict; unknown ids pass through untouched for upstream to report.
+    """
+    connection_id = llm_dict.get('provider_connection_id')
+    if not connection_id:
+        return llm_dict
+    try:
+        connection = _provider_connection_store(settings_store).get(connection_id)
+    except Exception:
+        return llm_dict
+    if connection is None:
+        return llm_dict
+    resolved = dict(llm_dict)
+    try:
+        key_value = connection.api_key_value()
+    except Exception:
+        key_value = None
+    if key_value and not resolved.get('api_key'):
+        resolved['api_key'] = key_value
+    if connection.base_url and not resolved.get('base_url'):
+        resolved['base_url'] = connection.base_url
+    # Sandbox has no such connection id — clear it so it uses inline creds.
+    resolved.pop('provider_connection_id', None)
+    return resolved
+
+
 @_local_protocol_router.get(
     '/api/llm/provider-connections', dependencies=[Depends(_require_global_auth)]
 )
@@ -1932,7 +1966,30 @@ async def create_conversation(
             detail='No agent server URL for sandbox',
         )
 
-    # 3. Forward entire body unchanged to sandbox
+    # 3. Materialize linked provider connection: sandboxes have an empty
+    # connection store, so resolve the id into inline key/base_url here.
+    try:
+        from openhands.app_server.user_auth import get_user_auth as _get_user_auth
+
+        _user_auth = await _get_user_auth(request)
+        _settings_store = await _user_auth.get_user_settings_store()
+        agent_settings = payload.get('agent_settings')
+        if isinstance(agent_settings, dict):
+            llm = agent_settings.get('llm')
+            if isinstance(llm, dict) and llm.get('provider_connection_id'):
+                payload = {
+                    **payload,
+                    'agent_settings': {
+                        **agent_settings,
+                        'llm': _materialize_llm_provider_connection(
+                            llm, _settings_store
+                        ),
+                    },
+                }
+    except Exception:
+        pass
+
+    # 4. Forward body to sandbox
     headers = {}
     if sandbox.session_api_key:
         headers['X-Session-API-Key'] = sandbox.session_api_key

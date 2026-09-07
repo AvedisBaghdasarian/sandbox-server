@@ -1,0 +1,70 @@
+# Standalone E2E stack: real sandbox-server build + published agent-canvas.
+#
+# Usage (from the repository root):
+#   ./e2e/run-e2e.sh [--keep] [--no-build]
+#
+# Topology:
+#   - sandbox-server: built from ./containers/app/Dockerfile (coolify branch),
+#     container port 3000, published on host ${APP_PORT:-3000}.
+#     Spawns one agent-server container per session via /var/run/docker.sock,
+#     so the agent-server image must be available locally.
+#   - frontend: ghcr.io/openhands/agent-canvas:latest (pulled), container
+#     port 8000, published on host ${E2E_FRONTEND_PORT:-8080}. Only its static
+#     UI is used; the backend under test is sandbox-server on :3000.
+#
+# Auth/secrets come from the environment (see run-e2e.sh); nothing is baked
+# into this file and no .env is referenced here.
+
+services:
+  sandbox-server:
+    build:
+      # NOTE: with `-f e2e/docker-compose.e2e.yml`, compose resolves relative
+      # paths against the compose file's own directory (e2e/), so the repo
+      # root is `..` regardless of the caller's cwd.
+      context: ..
+      dockerfile: ./containers/app/Dockerfile
+    image: openhands-sandbox-server:e2e
+    environment:
+      - SESSION_API_KEY=${SESSION_API_KEY:?Set SESSION_API_KEY before compose up}
+      - OH_SECRET_KEY=${OH_SECRET_KEY:?Set OH_SECRET_KEY before compose up}
+      - SANDBOX_USER_ID=${SANDBOX_USER_ID:-1000}
+      - AGENT_SERVER_IMAGE_REPOSITORY=${AGENT_SERVER_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
+      - AGENT_SERVER_IMAGE_TAG=${AGENT_SERVER_IMAGE_TAG:-1.44.1-python}
+      - OH_SANDBOX_HOST_PORT=${APP_PORT:-3000}
+      - OH_SANDBOX_STARTUP_TIMEOUT=${OH_SANDBOX_STARTUP_TIMEOUT:-300}
+      - RUNTIME=${RUNTIME:-}
+      - WORKSPACE_MOUNT_PATH=${WORKSPACE_MOUNT_PATH:-/opt/workspace_base}
+      # Optional JSON env overrides forwarded into every sandbox (see
+      # get_agent_server_env). The E2E harness uses it to bridge the LLM
+      # credential into sandboxes (documented workaround, see run-e2e.sh).
+      - OH_AGENT_SERVER_ENV=${OH_AGENT_SERVER_ENV:-}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Test-scoped named volumes: `compose --project-name sandbox-e2e down -v`
+      # removes only these, never unrelated project volumes.
+      - e2e_sandbox_state:/.openhands
+      - e2e_sandbox_workspaces:/opt/workspace_base
+    stdin_open: true
+    tty: true
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  frontend:
+    image: ghcr.io/openhands/agent-canvas:latest
+    ports:
+      - "${E2E_FRONTEND_PORT:-8080}:8000"
+    depends_on:
+      sandbox-server:
+        condition: service_healthy
+
+volumes:
+  e2e_sandbox_state: {}
+  e2e_sandbox_workspaces: {}
