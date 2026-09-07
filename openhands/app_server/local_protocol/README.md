@@ -49,10 +49,13 @@ and a per-sandbox `session_api_key`. The adapter MUST rewrite every
 <external base>/runtime/{sandbox_id}/api/conversations/{id.hex}
 ```
 
-where `<external base>` is the adapter's externally-reachable base URL
-(derived from the request host / config, e.g. `http://<host>:3000`), preserving
-any public mount prefix already in the base (e.g. `http://<host>/sandbox-server`
-yields `http://<host>/sandbox-server/runtime/{sandbox_id}/api/conversations/{id.hex}`).
+where `<external base>` is the adapter's externally-reachable base URL,
+resolved as `SERVICE_URL_SANDBOX_SERVER` when set (e.g.
+`https://host/sandbox-server`, mount prefix included), else the proxy's
+`X-Forwarded-Proto/Host/Port/Prefix` headers, else the request itself
+(e.g. `http://<host>:3000` for direct local deployments). Sandbox-to-sandbox
+traffic keeps using internal container URLs; only browser-facing URLs use
+this base.
 The `session_api_key` is passed through unchanged — the adapter uses it as
 `X-Session-API-Key` when proxying to the sandbox. agent-canvas derives its REST
 base and its WebSocket URLs (`/runtime/{sandbox_id}/sockets/events/{id}`,

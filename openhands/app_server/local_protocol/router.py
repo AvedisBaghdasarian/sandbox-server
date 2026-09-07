@@ -64,6 +64,7 @@ from .helpers import (
     build_server_info,
     build_upstream_ws_url,
     external_base_from_request_base_url,
+    resolve_external_base,
     rewrite_conversation_url,
 )
 
@@ -120,7 +121,21 @@ def _get_agent_server_version() -> str:
 
 
 def _external_base(request: Request) -> str:
-    return external_base_from_request_base_url(str(request.base_url))
+    """Browser-facing base for ``conversation_url``.
+
+    Prefers the explicit ``SERVICE_URL_SANDBOX_SERVER`` deployment value
+    (which includes the public mount prefix), then proxy forwarded headers,
+    then the request itself. See ``resolve_external_base``.
+    """
+    headers = request.headers
+    return resolve_external_base(
+        configured_url=os.environ.get('SERVICE_URL_SANDBOX_SERVER', ''),
+        forwarded_proto=headers.get('x-forwarded-proto', ''),
+        forwarded_host=headers.get('x-forwarded-host', ''),
+        forwarded_port=headers.get('x-forwarded-port', ''),
+        forwarded_prefix=headers.get('x-forwarded-prefix', ''),
+        fallback_base=external_base_from_request_base_url(str(request.base_url)),
+    )
 
 
 def _get_agent_server_url_from_sandbox(sandbox) -> str | None:

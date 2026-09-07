@@ -9,6 +9,7 @@ from openhands.app_server.local_protocol.helpers import (
     external_base_from_request_base_url,
     models_to_wrapped,
     providers_page_to_wrapped,
+    resolve_external_base,
     rewrite_conversation_url,
     verified_map_to_object,
 )
@@ -57,6 +58,50 @@ class TestRewriteConversationUrl:
         assert (
             external_base_from_request_base_url('http://example.com/base/')
             == 'http://example.com/base'
+        )
+
+
+class TestResolveExternalBase:
+    def test_configured_url_wins(self):
+        url = resolve_external_base(
+            configured_url='https://openhands.noidlabs.org/sandbox-server/',
+            forwarded_proto='http',
+            forwarded_host='internal',
+            forwarded_prefix='/other',
+            fallback_base='http://internal:3000',
+        )
+        assert url == 'https://openhands.noidlabs.org/sandbox-server'
+
+    def test_forwarded_headers_build_public_base(self):
+        url = resolve_external_base(
+            forwarded_proto='https',
+            forwarded_host='openhands.noidlabs.org',
+            forwarded_port='443',
+            forwarded_prefix='/sandbox-server',
+            fallback_base='http://openhands.noidlabs.org:3000',
+        )
+        assert url == 'https://openhands.noidlabs.org/sandbox-server'
+
+    def test_nonstandard_forwarded_port_kept(self):
+        url = resolve_external_base(
+            forwarded_proto='https',
+            forwarded_host='example.com',
+            forwarded_port='8443',
+            fallback_base='http://example.com',
+        )
+        assert url == 'https://example.com:8443'
+
+    def test_prefix_only_uses_fallback_host(self):
+        url = resolve_external_base(
+            forwarded_prefix='/sandbox-server',
+            fallback_base='http://internal:3000',
+        )
+        assert url == 'http://internal:3000/sandbox-server'
+
+    def test_no_signals_returns_fallback(self):
+        assert (
+            resolve_external_base(fallback_base='http://localhost:3000/')
+            == 'http://localhost:3000'
         )
 
 

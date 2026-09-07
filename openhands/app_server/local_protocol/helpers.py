@@ -6,6 +6,8 @@ Docker or a live sandbox.
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 
 def rewrite_conversation_url(
     external_base: str,
@@ -42,6 +44,62 @@ def external_base_from_request_base_url(base_url: str) -> str:
     callers can safely append ``/runtime/...``.
     """
     return base_url.rstrip('/')
+
+
+def resolve_external_base(
+    *,
+    configured_url: str = '',
+    forwarded_proto: str = '',
+    forwarded_host: str = '',
+    forwarded_port: str = '',
+    forwarded_prefix: str = '',
+    fallback_base: str,
+) -> str:
+    """Resolve the browser-facing base URL for ``conversation_url``.
+
+    Precedence (first hit wins):
+
+    1. ``configured_url`` — explicit deployment value such as
+       ``SERVICE_URL_SANDBOX_SERVER`` (e.g.
+       ``https://example.com/sandbox-server``). Already includes any public
+       mount prefix.
+    2. Reverse-proxy forwarded headers — ``X-Forwarded-Proto``,
+       ``X-Forwarded-Host``, ``X-Forwarded-Port`` (Traefik/Cloudflare supply
+       these) plus ``X-Forwarded-Prefix`` (Traefik's ``StripPrefix``
+       middleware records the removed mount prefix there). Missing pieces
+       fall back to ``fallback_base``.
+    3. ``fallback_base`` — typically ``str(request.base_url)`` for
+       local/direct deployments with no proxy in front.
+
+    Only affects URLs handed to the browser. Sandbox-to-sandbox traffic
+    keeps using internal container URLs.
+    """
+    configured = (configured_url or '').strip()
+    if configured:
+        return configured.rstrip('/')
+
+    proto = (forwarded_proto or '').split(',')[0].strip()
+    host = (forwarded_host or '').split(',')[0].strip()
+    port = (forwarded_port or '').split(',')[0].strip()
+    prefix = (forwarded_prefix or '').strip().strip('/')
+    if not (proto or host or port or prefix):
+        return fallback_base.rstrip('/')
+
+    fallback = urlsplit(
+        fallback_base if '://' in fallback_base else f'http://{fallback_base}'
+    )
+    scheme = proto or fallback.scheme or 'http'
+    host = host or fallback.hostname or ''
+    if not port and fallback.port:
+        port = str(fallback.port)
+    if port and not (
+        (scheme == 'https' and port == '443') or (scheme == 'http' and port == '80')
+    ):
+        host = f'{host}:{port}'
+    base = f'{scheme}://{host}'
+    if prefix:
+        base = f'{base}/{prefix}'
+    return base
 
 
 # ---------------------------------------------------------------------------
