@@ -64,7 +64,9 @@ def compose(
 def wait_healthy(url: str, name: str, budget_s: int) -> None:
     print(f'Waiting for {name} {url} ...', flush=True)
     deadline = time.monotonic() + budget_s
-    with httpx.Client(timeout=5) as client:
+    # Accept any sub-400 status: the frontend answers `/` with a 308 to
+    # `/canvas/`, which is healthy (curl -fsS behaves the same way).
+    with httpx.Client(timeout=5, follow_redirects=True) as client:
         while True:
             try:
                 if client.get(url).is_success:
