@@ -1,4 +1,4 @@
-# sandbox-server E2E (real containers + headless Chromium)
+# sandbox-server E2E (real containers + headless Chromium, Python Playwright)
 
 Proves the full user path against the real stack: published `agent-canvas`
 UI driving a freshly built `sandbox-server`, with one cheap live LLM turn.
@@ -14,7 +14,7 @@ Compose file: `e2e/docker-compose.e2e.yml` (standalone, run from repo root).
 Project name `sandbox-e2e` prefixes all containers/volumes, so
 `down -v` only removes this run's resources (`sandbox-e2e_*`).
 
-## What the spec does (`e2e/tests/full-user-path.spec.ts`)
+## What the spec does (`e2e/test_full_user_path.py`)
 
 1. Opens the frontend (served under `/canvas`), opts out of telemetry,
    skips onboarding, opens Manage Backends, types a local backend
@@ -30,32 +30,36 @@ Project name `sandbox-e2e` prefixes all containers/volumes, so
    word `PING_OK` plus `echo E2E_TRIVIAL_OK`, asserts both tokens appear
    outside the user's own message (UI-first; events API only corroborates).
 
-Headless Chromium via Playwright, explicit waits (no sleeps), max 1 retry.
+Headless Chromium via Python Playwright (`pytest-playwright` fixtures in
+`e2e/conftest.py`, system Chromium when present), explicit waits (no sleeps).
 
 ## Run
 
 ```bash
-./e2e/run-e2e.sh [--keep] [--no-build]
+python e2e/run_e2e.py [--keep] [--no-build]
 ```
 
+- `--no-build` reuses the previous `e2e` image; otherwise `docker compose
+  build` runs, which is layer-cached and fast when nothing changed. The
+  frontend image is pulled, never built.
 - Throwaway `SESSION_API_KEY`/`OH_SECRET_KEY` are generated per run.
 - The LLM key is read at runtime from repo-root `.env` (`api_key=`); the run
   fails fast if it is missing. It lives in memory only and is never printed,
   logged, or written to any file/report (password fields, no tracing, no
-  video/trace artifacts).
-- Sandbox warm-up: `run-e2e.sh` creates (then deletes) one messageless
+  video, screenshots on failure only).
+- Sandbox warm-up: the runner creates (then deletes) one messageless
   throwaway conversation before the spec so a sandbox is running. Without it
   the frontend's first create fails: it resolves its relative working dir via
   `GET /api/file/home`, which 404s (`No sandbox available`) on a fresh stack
   — a real product gap (fresh user → first Send dies in an error toast). The
   throwaway sends no message, so this costs zero LLM spend.
-- Artifacts (`test-results/`, `playwright-report/`) are gitignored.
+- No video/trace/har artifacts: they can record credential-bearing request
+  bodies. Screenshots land in `e2e/test-results/` (gitignored) on failure only.
 
 ## Secrets & git hygiene
 
-- Never commit `.env`, keys, or `e2e/` run artifacts. `.env` is already in
-  `.gitignore`; `e2e/test-results`, `e2e/playwright-report`, `e2e/node_modules`
-  and logs are ignored too.
+- Never commit `.env`, keys, or `e2e/` run artifacts. `e2e/test-results` and
+  logs are ignored too.
 - Override names/ports via env: `APP_PORT`, `E2E_FRONTEND_PORT`,
   `E2E_CONNECTION_NAME`, `E2E_PROFILE_NAME`, `E2E_MODEL_ID`,
   `E2E_PROVIDER_BASE_URL`.

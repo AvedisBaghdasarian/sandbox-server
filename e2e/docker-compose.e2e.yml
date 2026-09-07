@@ -1,7 +1,7 @@
 # Standalone E2E stack: real sandbox-server build + published agent-canvas.
 #
 # Usage (from the repository root):
-#   ./e2e/run-e2e.sh [--keep] [--no-build]
+#   python e2e/run_e2e.py [--keep] [--no-build]
 #
 # Topology:
 #   - sandbox-server: built from ./containers/app/Dockerfile (coolify branch),
@@ -12,7 +12,7 @@
 #     port 8000, published on host ${E2E_FRONTEND_PORT:-8080}. Only its static
 #     UI is used; the backend under test is sandbox-server on :3000.
 #
-# Auth/secrets come from the environment (see run-e2e.sh); nothing is baked
+# Auth/secrets come from the environment (see run_e2e.py); nothing is baked
 # into this file and no .env is referenced here.
 
 services:
@@ -36,7 +36,7 @@ services:
       - WORKSPACE_MOUNT_PATH=${WORKSPACE_MOUNT_PATH:-/opt/workspace_base}
       # Optional JSON env overrides forwarded into every sandbox (see
       # get_agent_server_env). The E2E harness uses it to bridge the LLM
-      # credential into sandboxes (documented workaround, see run-e2e.sh).
+      # credential into sandboxes (see run_e2e.py).
       - OH_AGENT_SERVER_ENV=${OH_AGENT_SERVER_ENV:-}
     ports:
       - "${APP_PORT:-3000}:3000"
