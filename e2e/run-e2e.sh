@@ -47,21 +47,20 @@ OH_SECRET_KEY="$(openssl rand -hex 32)"
 export SESSION_API_KEY OH_SECRET_KEY
 export E2E_LLM_API_KEY
 export E2E_SESSION_KEY="${SESSION_API_KEY}"
-# Bridge the LLM credential into sandboxes (documented product-gap
-# workaround, see README): the local-protocol shim forwards conversation
-# payloads unchanged and sandboxes boot with an empty provider-connections
-# store, so a linked profile alone leaves the agent with no key
-# (LLMAuthenticationError on the first turn). The agent-server's litellm
-# honors OPENAI_API_KEY/OPENAI_API_BASE env, which OH_AGENT_SERVER_ENV
-# forwards into every sandbox. Same key value the UI stores on the provider
-# connection; memory-only, never printed, never written to any file.
-export OH_AGENT_SERVER_ENV="{\"OPENAI_API_KEY\":\"${E2E_LLM_API_KEY}\",\"OPENAI_API_BASE\":\"${E2E_PROVIDER_BASE_URL}\",\"OPENAI_BASE_URL\":\"${E2E_PROVIDER_BASE_URL}\"}"
+# Bridge the LLM credential into sandboxes (belt-and-braces alongside the
+# shim's materialize-on-create in local_protocol/router.py, which resolves a
+# linked provider_connection_id into inline key/base_url before forwarding).
+# The agent-server's litellm honors OPENAI_API_KEY/OPENAI_API_BASE env, which
+# OH_AGENT_SERVER_ENV forwards into every sandbox. Same key value the UI
+# stores on the provider connection; memory-only, never printed, never
+# written to any file.
+export E2E_PROVIDER_BASE_URL="${E2E_PROVIDER_BASE_URL:-https://opencode.ai/zen/go/v1}"
 export E2E_FRONTEND_URL="${FRONTEND_URL}"
 export E2E_BACKEND_URL="${BACKEND_URL}"
 export E2E_CONNECTION_NAME="${E2E_CONNECTION_NAME:-e2e-openai}"
 export E2E_PROFILE_NAME="${E2E_PROFILE_NAME:-e2e-profile}"
 export E2E_MODEL_ID="${E2E_MODEL_ID:-openai/muse-spark-1.3-contributor}"
-export E2E_PROVIDER_BASE_URL="${E2E_PROVIDER_BASE_URL:-https://opencode.ai/zen/go/v1}"
+export OH_AGENT_SERVER_ENV="{\"OPENAI_API_KEY\":\"${E2E_LLM_API_KEY}\",\"OPENAI_API_BASE\":\"${E2E_PROVIDER_BASE_URL}\",\"OPENAI_BASE_URL\":\"${E2E_PROVIDER_BASE_URL}\"}"
 
 COMPOSE=(docker compose --project-name "${PROJECT}" -f e2e/docker-compose.e2e.yml)
 
