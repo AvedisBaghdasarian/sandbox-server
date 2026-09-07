@@ -2252,9 +2252,26 @@ async def file_home(
         if page.items:
             sandbox_id = page.items[0].id
     if not sandbox_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail='No sandbox available'
-        )
+        # Fresh stack: boot one on demand so the first conversation can
+        # resolve its working dir instead of 404ing 'No sandbox available'.
+        # Mirrors create_conversation's start-and-wait (cold boots can take
+        # minutes; the caller's retry then hits the running sandbox).
+        try:
+            new_sandbox = await sandbox_service.start_sandbox()
+            new_sandbox = await sandbox_service.wait_for_sandbox_running(
+                new_sandbox.id,
+                timeout=get_sandbox_startup_timeout(),
+                poll_interval=2,
+                httpx_client=httpx_client,
+            )
+            sandbox_id = new_sandbox.id
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f'Failed to start sandbox: {exc}',
+            ) from exc
     sandbox = await sandbox_service.get_sandbox(sandbox_id)
     agent_url = _get_agent_server_url_from_sandbox(sandbox) if sandbox else None
     if not agent_url:
