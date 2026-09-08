@@ -24,6 +24,16 @@ def browser_type_launch_args() -> dict:
     return args
 
 
+@pytest.fixture(scope='session')
+def browser_context_args() -> dict:
+    # Record the run (chromium headless supports video). Stored under the
+    # gitignored test-results dir; the runner converts to mp4 afterwards.
+    return {
+        'record_video_dir': str(RESULTS_DIR / 'video'),
+        'record_video_size': {'width': 1280, 'height': 800},
+    }
+
+
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
