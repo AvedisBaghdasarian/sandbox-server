@@ -215,9 +215,16 @@ def build_upstream_ws_url(agent_base: str, path: str, query: str) -> str:
         query: Raw query string without leading ``?`` (may be empty).
 
     Returns:
-        ``{agent_base}{path}`` with ``?{query}`` appended when non-empty.
+        ``ws(s)://{agent_base}{path}`` with ``?{query}`` appended when
+        non-empty. The ``http``/``https`` scheme of ``agent_base`` is mapped
+        to ``ws``/``wss`` since the ``websockets`` client rejects HTTP URLs.
     """
-    url = f'{agent_base.rstrip("/")}{path}'
+    base = agent_base.rstrip('/')
+    if base.startswith('https://'):
+        base = 'wss://' + base[len('https://') :]
+    elif base.startswith('http://'):
+        base = 'ws://' + base[len('http://') :]
+    url = f'{base}{path}'
     if query:
         url += f'?{query}'
     return url

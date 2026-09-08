@@ -2870,20 +2870,53 @@ async def _ws_relay_upstream_to_browser(websocket: WebSocket, upstream) -> None:
         pass
 
 
+async def _agent_base_for_ws_bridge(
+    websocket: WebSocket, sandbox_id: str
+) -> str | None:
+    """Resolve a sandbox's agent-server base URL for a websocket bridge.
+
+    Websocket routes cannot use the ``Depends(injector.depends)`` helpers
+    (they require an HTTP ``Request``), so resolve through the injector
+    context directly. Only the URL string outlives the context — the relay
+    itself uses the ``websockets`` client, not injected services.
+    """
+    import logging as _logging
+
+    from openhands.app_server.config import get_global_config
+
+    _log = _logging.getLogger(__name__)
+    injector = get_global_config().sandbox
+    if injector is None:
+        _log.warning('ws-bridge: no sandbox injector configured')
+        return None
+    async with injector.context(websocket.app.state, None) as sandbox_service:
+        sandbox = await sandbox_service.get_sandbox(sandbox_id)
+        if not sandbox:
+            _log.warning('ws-bridge: sandbox %s not found', sandbox_id)
+            return None
+        url = _get_agent_server_url_from_sandbox(sandbox)
+        if not url:
+            _log.warning(
+                'ws-bridge: sandbox %s has no agent url (status=%s)',
+                sandbox_id,
+                getattr(sandbox, 'status', None),
+            )
+            return None
+        return url
+
+
 async def _handle_ws_bridge(
     websocket: WebSocket,
     sandbox_id: str,
     upstream_path: str,
-    sandbox_service: SandboxService,
 ) -> None:
     """Common WebSocket bridge logic (transparent relay)."""
-    sandbox = await sandbox_service.get_sandbox(sandbox_id)
-    if not sandbox:
-        await websocket.close(code=1008, reason='sandbox not found')
-        return
-    agent_base = _get_agent_server_url_from_sandbox(sandbox)
+    agent_base = await _agent_base_for_ws_bridge(websocket, sandbox_id)
     if not agent_base:
-        await websocket.close(code=1011, reason='no agent server url')
+        try:
+            await websocket.close(code=1008, reason='sandbox not found')
+        except Exception:
+            pass
         return
     query = str(websocket.url.query) if websocket.url.query else ''
     upstream_url = build_upstream_ws_url(agent_base, upstream_path, query)
@@ -2925,8 +2958,11 @@ async def _handle_ws_bridge(
         # Also handle case where websocket was accepted but upstream failed
         import logging as _logging
 
-        _logging.getLogger(__name__).debug('ws bridge connect failed: %s', exc)
-    except Exception:
+        _logging.getLogger(__name__).warning('ws bridge upstream failed: %r', exc)
+    except Exception as exc:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning('ws bridge failed: %r', exc)
         try:
             await websocket.close(code=1011)
         except Exception:
@@ -2940,21 +2976,17 @@ async def ws_events_bridge(
     websocket: WebSocket,
     sandbox_id: str,
     conversation_id: str,
-    sandbox_service: SandboxService = _sandbox_service_dep,
 ):
     upstream_path = f'/sockets/events/{conversation_id}'
-    await _handle_ws_bridge(websocket, sandbox_id, upstream_path, sandbox_service)
+    await _handle_ws_bridge(websocket, sandbox_id, upstream_path)
 
 
 @_local_protocol_router.websocket('/runtime/{sandbox_id}/sockets/bash-events')
 async def ws_bash_bridge(
     websocket: WebSocket,
     sandbox_id: str,
-    sandbox_service: SandboxService = _sandbox_service_dep,
 ):
-    await _handle_ws_bridge(
-        websocket, sandbox_id, '/sockets/bash-events', sandbox_service
-    )
+    await _handle_ws_bridge(websocket, sandbox_id, '/sockets/bash-events')
 
 
 # Expose as local_protocol_router
