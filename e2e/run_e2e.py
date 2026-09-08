@@ -29,7 +29,12 @@ COMPOSE_FILE = REPO_ROOT / 'e2e' / 'docker-compose.e2e.yml'
 
 APP_PORT = os.environ.get('APP_PORT', '3000')
 FRONTEND_PORT = os.environ.get('E2E_FRONTEND_PORT', '8080')
-BACKEND_URL = f'http://localhost:{APP_PORT}'
+EDGE_PORT = os.environ.get('E2E_EDGE_PORT', '8099')
+# Public backend address, mount prefix included — the exact production shape.
+# The browser and all test API calls use this; :3000 stays published for
+# health checks and sandbox webhook callbacks only.
+PUBLIC_BASE = f'http://localhost:{EDGE_PORT}/sandbox-server'
+BACKEND_URL = PUBLIC_BASE
 FRONTEND_URL = f'http://localhost:{FRONTEND_PORT}'
 
 
@@ -78,7 +83,7 @@ def wait_healthy(url: str, name: str, budget_s: int) -> None:
                 logs = compose(
                     'logs',
                     '--tail=50',
-                    'sandbox-server' if '3000' in url else 'frontend',
+                    'edge' if name == 'edge' else name,
                     env=os.environ.copy(),
                     check=False,
                 )
@@ -173,6 +178,10 @@ def main() -> int:
             'E2E_MODEL_ID', 'openai/muse-spark-1.3-contributor'
         ),
         'E2E_PROVIDER_BASE_URL': provider_base,
+        # Public base the edge serves (mount prefix included); the shim
+        # builds browser-facing conversation_url from it.
+        'E2E_PUBLIC_BASE_URL': PUBLIC_BASE,
+        'E2E_EDGE_PORT': EDGE_PORT,
         # Belt-and-braces with the shim's materialize-on-create: forward the
         # credential into every sandbox via litellm env.
         'OH_AGENT_SERVER_ENV': (
@@ -222,7 +231,8 @@ def main() -> int:
         )
         print('Starting stack...', flush=True)
         compose('up', '-d', env=env)
-        wait_healthy(f'{BACKEND_URL}/health', 'sandbox-server', 300)
+        wait_healthy(f'http://localhost:{APP_PORT}/health', 'sandbox-server', 300)
+        wait_healthy(f'{BACKEND_URL}/health', 'edge', 120)
         wait_healthy(FRONTEND_URL, 'frontend', 240)
         warm_up_sandbox(BACKEND_URL, session_key, env['E2E_MODEL_ID'])
         print('Running Playwright spec (headless Chromium)...', flush=True)

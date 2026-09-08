@@ -5,17 +5,30 @@
 #
 # Topology:
 #   - sandbox-server: built from ./containers/app/Dockerfile (coolify branch),
-#     container port 3000, published on host ${APP_PORT:-3000}.
-#     Spawns one agent-server container per session via /var/run/docker.sock,
-#     so the agent-server image must be available locally.
+#     container port 3000. Not published directly; reached through `edge`.
+#   - edge: nginx:alpine reverse proxy, host ${E2E_EDGE_PORT:-8099} → 80.
+#     Serves the backend under /sandbox-server/ (prefix stripped), mirroring
+#     production (https://host/sandbox-server). The app rebuilds the public
+#     base from SERVICE_URL_SANDBOX_SERVER below.
 #   - frontend: ghcr.io/openhands/agent-canvas:latest (pulled), container
 #     port 8000, published on host ${E2E_FRONTEND_PORT:-8080}. Only its static
-#     UI is used; the backend under test is sandbox-server on :3000.
+#     UI is used; the backend under test is reached via the edge proxy.
 #
 # Auth/secrets come from the environment (see run_e2e.py); nothing is baked
 # into this file and no .env is referenced here.
 
 services:
+  edge:
+    image: nginx:alpine
+    volumes:
+      # Replace the stock default server so all port-80 traffic hits ours.
+      - ./nginx.e2e.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${E2E_EDGE_PORT:-8099}:80"
+    depends_on:
+      sandbox-server:
+        condition: service_healthy
+
   sandbox-server:
     build:
       # NOTE: with `-f e2e/docker-compose.e2e.yml`, compose resolves relative
@@ -38,7 +51,14 @@ services:
       # get_agent_server_env). The E2E harness uses it to bridge the LLM
       # credential into sandboxes (see run_e2e.py).
       - OH_AGENT_SERVER_ENV=${OH_AGENT_SERVER_ENV:-}
+      # Public browser-facing base, mount prefix included. The shim builds
+      # conversation_url (and hence socket URLs) from this, so the browser
+      # keeps the /sandbox-server prefix end to end.
+      - SERVICE_URL_SANDBOX_SERVER=${E2E_PUBLIC_BASE_URL:-}
     ports:
+      # Direct port stays published for sandbox webhook callbacks
+      # (host.docker.internal:${APP_PORT}) and debugging; the test itself
+      # only uses the edge URL below.
       - "${APP_PORT:-3000}:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"

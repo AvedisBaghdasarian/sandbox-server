@@ -7,8 +7,15 @@ UI driving a freshly built `sandbox-server`, with one cheap live LLM turn.
 
 | Service | Source | Ports |
 |---|---|---|
-| `sandbox-server` | built from `./containers/app/Dockerfile` (coolify branch) | host `${APP_PORT:-3000}` → container `3000` |
+| `sandbox-server` | built from `./containers/app/Dockerfile` (coolify branch) | host `${APP_PORT:-3000}` → container `3000` (health/webhooks only) |
+| `edge` | `nginx:alpine` with `e2e/nginx.e2e.conf` | host `${E2E_EDGE_PORT:-8099}` → container `80` |
 | `frontend` | `ghcr.io/openhands/agent-canvas:latest` (pulled) | host `${E2E_FRONTEND_PORT:-8080}` → container `8000` |
+
+The backend under test is `http://localhost:8099/sandbox-server` through
+`edge`, which strips the mount prefix exactly like production. The shim
+rebuilds the public base from `SERVICE_URL_SANDBOX_SERVER` (set to that URL
+by the runner), so `conversation_url` and both socket URLs keep the prefix
+end to end — that is what this topology exists to prove.
 
 Compose file: `e2e/docker-compose.e2e.yml` (standalone, run from repo root).
 Project name `sandbox-e2e` prefixes all containers/volumes, so
