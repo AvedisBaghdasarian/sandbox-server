@@ -376,6 +376,19 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
         f'UI-typed headers lost on save: {stored_headers!r}'
     )
     print(f'[{elapsed()}] extra headers persisted', flush=True)
+    # Speed config (not part of the UI flow under test): drop reasoning effort
+    # to low so the single-turn assertion isn't stuck behind a 200k-token
+    # thinking budget. Round-trips the stored config with one field changed.
+    stored_cfg = stored.json().get('config') or {}
+    stored_cfg['reasoning_effort'] = 'low'
+    tuned = api.post(
+        f'{BACKEND_URL}/api/profiles/{PROFILE_NAME}',
+        headers=headers,
+        data={'llm': stored_cfg, 'preserve_existing_api_key': True},
+        timeout=30_000,
+    )
+    assert tuned.ok, 'reasoning tuning saved'
+    print(f'[{elapsed()}] reasoning tuned low', flush=True)
     verdict = api.post(
         f'{BACKEND_URL}/api/profiles/{PROFILE_NAME}/validate',
         headers=headers,
