@@ -356,7 +356,7 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     assert verdict.ok, 'validate endpoint reachable'
     verdict_body = verdict.json()
     assert verdict_body.get('valid') is True, (
-        f"model cannot complete (fail fast): {verdict_body.get('error')}"
+        f'model cannot complete (fail fast): {verdict_body.get("error")}'
     )
     print(f'[{elapsed()}] model pre-flight valid', flush=True)
 
