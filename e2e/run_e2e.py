@@ -176,7 +176,7 @@ def main() -> int:
         'E2E_PROFILE_NAME': os.environ.get('E2E_PROFILE_NAME', 'e2e-profile'),
         # Default model verified live against this proxy (returns 200);
         # override with E2E_MODEL_ID for any other served model.
-        'E2E_MODEL_ID': os.environ.get('E2E_MODEL_ID', 'glm-5.2'),
+        'E2E_MODEL_ID': os.environ.get('E2E_MODEL_ID', 'openai/glm-5.2'),
         'E2E_PROVIDER_BASE_URL': provider_base,
         # Public base the edge serves (mount prefix included); the shim
         # builds browser-facing conversation_url from it.

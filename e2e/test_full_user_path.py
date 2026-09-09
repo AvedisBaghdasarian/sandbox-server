@@ -29,7 +29,7 @@ SESSION_KEY = os.environ.get('E2E_SESSION_KEY', '')
 LLM_API_KEY = os.environ.get('E2E_LLM_API_KEY', '')
 CONNECTION_NAME = os.environ.get('E2E_CONNECTION_NAME', 'e2e-openai')
 PROFILE_NAME = os.environ.get('E2E_PROFILE_NAME', 'e2e-profile')
-MODEL_ID = os.environ.get('E2E_MODEL_ID', 'glm-5.2')
+MODEL_ID = os.environ.get('E2E_MODEL_ID', 'openai/glm-5.2')
 PROVIDER_BASE_URL = os.environ.get(
     'E2E_PROVIDER_BASE_URL', 'https://opencode.ai/zen/go/v1'
 )
