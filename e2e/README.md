@@ -30,9 +30,10 @@ Project name `sandbox-e2e` prefixes all containers/volumes, so
 2. In LLM settings creates provider connection `e2e-openai`
    (`provider=openai`, `base_url=https://opencode.ai/zen/go/v1`, key from
    repo-root `.env` → `api_key`), asserts it is listed.
-3. Creates profile `e2e-profile` with model exactly
-   `openai/muse-spark-1.3-contributor` linked via `provider_connection_id`
-   (no inline `api_key`), asserts it is listed, then activates it.
+3. Creates profile `e2e-profile` with model `glm-5.2` (verified live
+   against this proxy; override with `E2E_MODEL_ID`) linked via
+   `provider_connection_id` (no inline `api_key`), asserts it is listed,
+   then activates it.
 4. Starts a conversation from the UI, sends one short message requesting the
    word `PING_OK` plus `echo E2E_TRIVIAL_OK`, asserts both tokens appear
    outside the user's own message (UI-first; events API only corroborates).
