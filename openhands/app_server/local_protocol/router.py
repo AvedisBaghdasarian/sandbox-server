@@ -2024,25 +2024,36 @@ async def create_conversation(
     except Exception:
         pass
 
-    # 4. Forward body to sandbox
+    # 4. Forward body to sandbox. A freshly booted agent can 500 the first
+    # attempt while still warming up (the harness sees this regularly), so
+    # retry once after a short pause instead of failing the user's send.
     headers = {}
     if sandbox.session_api_key:
         headers['X-Session-API-Key'] = sandbox.session_api_key
     # Ensure content-type
     headers['Content-Type'] = 'application/json'
 
-    try:
-        resp = await httpx_client.post(
-            f'{agent_url.rstrip("/")}/api/conversations',
-            json=payload,
-            headers=headers,
-            timeout=120.0,
-        )
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f'Failed to reach sandbox agent-server: {exc}',
-        ) from exc
+    resp = None
+    for attempt in (1, 2):
+        try:
+            resp = await httpx_client.post(
+                f'{agent_url.rstrip("/")}/api/conversations',
+                json=payload,
+                headers=headers,
+                timeout=120.0,
+            )
+        except httpx.RequestError as exc:
+            if attempt == 2:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f'Failed to reach sandbox agent-server: {exc}',
+                ) from exc
+            await asyncio.sleep(10)
+            continue
+        if resp.status_code < 500 or attempt == 2:
+            break
+        await asyncio.sleep(10)
+    assert resp is not None  # loop always assigns or raises
 
     if resp.status_code >= 400:
         # Return upstream error as-is
