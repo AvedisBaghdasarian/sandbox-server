@@ -360,10 +360,29 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     except Exception:
         pass
     assert connection_id, 'provider connection id readable via API'
+    # The UI-typed headers must have survived the save: read the stored
+    # profile back and compare against what was typed.
+    stored = api.get(
+        f'{BACKEND_URL}/api/profiles/{PROFILE_NAME}',
+        headers=headers,
+        timeout=30_000,
+    )
+    assert stored.ok, 'saved profile readable via API'
+    stored_headers = (stored.json().get('config') or {}).get('extra_headers')
+    assert stored_headers == json.loads(EXTRA_HEADERS_JSON), (
+        f'UI-typed headers lost on save: {stored_headers!r}'
+    )
+    print(f'[{elapsed()}] extra headers persisted', flush=True)
     verdict = api.post(
         f'{BACKEND_URL}/api/profiles/{PROFILE_NAME}/validate',
         headers=headers,
-        data={'llm': {'model': MODEL_ID, 'provider_connection_id': connection_id}},
+        data={
+            'llm': {
+                'model': MODEL_ID,
+                'provider_connection_id': connection_id,
+                'extra_headers': json.loads(EXTRA_HEADERS_JSON),
+            }
+        },
         timeout=90_000,
     )
     assert verdict.ok, 'validate endpoint reachable'
