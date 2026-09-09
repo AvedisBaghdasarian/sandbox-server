@@ -19,9 +19,12 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import Locator, Page, expect
+
+RESULTS_DIR = Path(__file__).resolve().parent / 'test-results'
 
 FRONTEND_URL = os.environ.get('E2E_FRONTEND_URL', 'http://localhost:8080')
 BACKEND_URL = os.environ.get('E2E_BACKEND_URL', 'http://localhost:3000')
@@ -452,6 +455,43 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     assert match, 'conversation id readable from URL'
     conversation_id = match.group(1)
 
+    def dump_event_timeline() -> None:
+        # Failure evidence: kinds + timestamps only (no bodies, no secrets).
+        try:
+            response = api.get(
+                f'{BACKEND_URL}/api/conversations/{conversation_id}/events/search',
+                headers=headers,
+                params={'limit': '100', 'sort_order': 'TIMESTAMP_DESC'},
+                timeout=15_000,
+            )
+            if not response.ok:
+                print(
+                    f'[{elapsed()}] timeline: events API {response.status}', flush=True
+                )
+                return
+            items = response.json().get('items') or []
+            kinds = [str(i.get('kind', '?')) for i in items if isinstance(i, dict)]
+            print(
+                f'[{elapsed()}] timeline: {len(items)} events: {sorted(set(kinds))}',
+                flush=True,
+            )
+            (RESULTS_DIR / 'last-events.json').write_text(
+                json.dumps(
+                    [
+                        {
+                            'kind': str(i.get('kind', '?')),
+                            'ts': str(i.get('timestamp', '')),
+                        }
+                        for i in items
+                        if isinstance(i, dict)
+                    ][:100]
+                )
+            )
+        except Exception as exc:
+            print(
+                f'[{elapsed()}] timeline unavailable: {type(exc).__name__}', flush=True
+            )
+
     # Liveness gate: the agent must produce ANY event beyond the user message
     # (action, thought, or error) within a tight budget. A dead model shows
     # exactly one event forever — fail there instead of burning minutes on
@@ -484,6 +524,7 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     deadline = time.monotonic() + 3 * 60
     while not body_has_token_outside_user_messages(page, BASH_TOKEN):
         if time.monotonic() > deadline:
+            dump_event_timeline()
             raise AssertionError('trivial command output never appeared')
         time.sleep(1)
     print(
