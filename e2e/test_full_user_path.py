@@ -36,6 +36,11 @@ PROVIDER_BASE_URL = os.environ.get(
 
 REPLY_TOKEN = 'PING_OK'
 BASH_TOKEN = 'E2E_TRIVIAL_OK'
+# Extra LLM headers as JSON, typed into the schema-driven All-tab textarea
+# (`sdk-settings-llm.extra_headers`). Memory only, never logged.
+EXTRA_HEADERS_JSON = os.environ.get(
+    'E2E_EXTRA_HEADERS_JSON', '{"x-opencode-session": "openhands-local-1"}'
+)
 
 _started_at = time.monotonic()
 
@@ -303,6 +308,14 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
         connection_combo.fill('')
         select_connection()
     expect(page.get_by_test_id('llm-api-key-input')).to_have_count(0, timeout=15_000)
+
+    # Extra headers via the schema-driven All-tab JSON textarea (UI-only path:
+    # no API shortcut). Present only when the agent-schema advertises the
+    # object field; linking a connection must not remove it.
+    headers_box = page.get_by_test_id('sdk-settings-llm.extra_headers')
+    expect(headers_box).to_be_visible(timeout=30_000)
+    headers_box.fill(EXTRA_HEADERS_JSON)
+    print(f'[{elapsed()}] extra headers typed', flush=True)
 
     dismiss_telemetry_dialog(page)
     resilient_click(page, page.get_by_test_id('save-profile-btn'))
