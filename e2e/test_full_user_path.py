@@ -15,6 +15,7 @@ memory only, filled into a password field, and never logged. Run via
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -329,6 +330,36 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     )
     print(f'[{elapsed()}] profile active', flush=True)
 
+    # Pre-flight gate (cheap, ~1 token): prove the linked model actually
+    # answers before spending a full conversation cycle on it. Fails fast
+    # with the provider error instead of a multi-minute UI timeout.
+    connection_id = None
+    try:
+        listed = api.get(
+            f'{BACKEND_URL}/api/llm/provider-connections',
+            headers=headers,
+            timeout=30_000,
+        )
+        if listed.ok:
+            for item in listed.json():
+                if item.get('display_name') == CONNECTION_NAME:
+                    connection_id = item.get('id')
+    except Exception:
+        pass
+    assert connection_id, 'provider connection id readable via API'
+    verdict = api.post(
+        f'{BACKEND_URL}/api/profiles/{PROFILE_NAME}/validate',
+        headers=headers,
+        data={'llm': {'model': MODEL_ID, 'provider_connection_id': connection_id}},
+        timeout=90_000,
+    )
+    assert verdict.ok, 'validate endpoint reachable'
+    verdict_body = verdict.json()
+    assert verdict_body.get('valid') is True, (
+        f"model cannot complete (fail fast): {verdict_body.get('error')}"
+    )
+    print(f'[{elapsed()}] model pre-flight valid', flush=True)
+
     # 4. Start a conversation from the home launcher and prove the agent
     # talks. One short turn, minimal spend: single terminal call + short reply.
     # Single line on purpose: Enter submits, so multiline would partial-send.
@@ -374,10 +405,10 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     print(f'[{elapsed()}] message sent', flush=True)
 
     # Sending creates the conversation and navigates; creation boots a fresh
-    # sandbox server-side, so allow a generous budget. On timeout, surface
+    # sandbox server-side, so allow a bounded budget. On timeout, surface
     # the visible error toast instead of a bare timeout.
     try:
-        expect(page).to_have_url(re.compile(r'/conversations/.+'), timeout=240_000)
+        expect(page).to_have_url(re.compile(r'/conversations/.+'), timeout=180_000)
     except AssertionError:
         toast = page.evaluate(
             '() => Array.from(document.querySelectorAll(\'[role="alert"],[data-testid="toast"]\'))'
@@ -389,7 +420,36 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     assert match, 'conversation id readable from URL'
     conversation_id = match.group(1)
 
-    deadline = time.monotonic() + 5 * 60
+    # Liveness gate: the agent must produce ANY event beyond the user message
+    # (action, thought, or error) within a tight budget. A dead model shows
+    # exactly one event forever — fail there instead of burning minutes on
+    # token polls. Error events fail immediately with the provider message.
+    deadline = time.monotonic() + 150
+    while True:
+        try:
+            probe = api.get(
+                f'{BACKEND_URL}/api/conversations/{conversation_id}/events/search',
+                headers=headers,
+                params={'limit': '20', 'sort_order': 'TIMESTAMP_DESC'},
+                timeout=15_000,
+            )
+            if probe.ok:
+                items = probe.json().get('items') or []
+                blob = json.dumps(items)
+                if re.search(r'LLM\w*Error|InternalServerError', blob):
+                    raise AssertionError(f'agent errored fast: {blob[:500]!r}')
+                if len(items) >= 2:
+                    break
+        except AssertionError:
+            raise
+        except Exception:
+            pass
+        if time.monotonic() > deadline:
+            raise AssertionError('agent produced zero events in 150s (dead turn)')
+        time.sleep(3)
+    print(f'[{elapsed()}] agent live', flush=True)
+
+    deadline = time.monotonic() + 3 * 60
     while not body_has_token_outside_user_messages(page, BASH_TOKEN):
         if time.monotonic() > deadline:
             raise AssertionError('trivial command output never appeared')
@@ -399,7 +459,7 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
         flush=True,
     )
 
-    deadline = time.monotonic() + 2 * 60
+    deadline = time.monotonic() + 90
     while not body_has_token_outside_user_messages(page, REPLY_TOKEN):
         if time.monotonic() > deadline:
             raise AssertionError('chat reply never appeared')
@@ -407,7 +467,7 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     print(f'[{elapsed()}] chat reply observed', flush=True)
 
     # Corroborate via the events API (UI assertions above are the real proof).
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + 30
     while True:
         try:
             response = api.get(
