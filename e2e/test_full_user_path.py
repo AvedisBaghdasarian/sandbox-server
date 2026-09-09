@@ -374,8 +374,16 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     print(f'[{elapsed()}] message sent', flush=True)
 
     # Sending creates the conversation and navigates; creation boots a fresh
-    # sandbox server-side, so allow a generous budget.
-    expect(page).to_have_url(re.compile(r'/conversations/.+'), timeout=240_000)
+    # sandbox server-side, so allow a generous budget. On timeout, surface
+    # the visible error toast instead of a bare timeout.
+    try:
+        expect(page).to_have_url(re.compile(r'/conversations/.+'), timeout=240_000)
+    except AssertionError:
+        toast = page.evaluate(
+            '() => Array.from(document.querySelectorAll(\'[role="alert"],[data-testid="toast"]\'))'
+            '.map((n) => n.textContent).join(" | ").slice(0, 500)'
+        )
+        raise AssertionError(f'never navigated to conversation (toast: {toast!r})')
     expect(page.get_by_test_id('chat-input')).to_be_visible(timeout=60_000)
     match = re.search(r'/conversations/([^/?#]+)', page.url)
     assert match, 'conversation id readable from URL'

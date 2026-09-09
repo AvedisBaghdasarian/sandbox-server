@@ -241,6 +241,17 @@ def main() -> int:
             cwd=REPO_ROOT,
             env={**env, 'PLAYWRIGHT_BROWSERS_PATH': '/root/.cache/ms-playwright'},
         )
+        if result.returncode != 0:
+            # Persist server logs for diagnosis before teardown. Redact both
+            # keys: sandbox agent logs can echo request material.
+            dump = compose('logs', '--tail=300', env=env, check=False).stdout
+            for secret in (llm_key, session_key):
+                if secret:
+                    dump = dump.replace(secret, '<redacted>')
+            results = REPO_ROOT / 'e2e' / 'test-results'
+            results.mkdir(parents=True, exist_ok=True)
+            (results / 'compose-logs.txt').write_text(dump[-200_000:])
+            print('compose logs saved to e2e/test-results/compose-logs.txt', flush=True)
         print(
             'E2E PASS: backend, connection, profile, chat reply + trivial output observed.'
             if result.returncode == 0
