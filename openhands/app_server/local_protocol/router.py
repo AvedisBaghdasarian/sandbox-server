@@ -3007,5 +3007,111 @@ async def ws_bash_bridge(
     await _handle_ws_bridge(websocket, sandbox_id, '/sockets/bash-events')
 
 
+async def _sandbox_id_for_ws_conversation(
+    websocket: WebSocket, conversation_id: str
+) -> str | None:
+    """Resolve the owning sandbox for a direct events-socket dial.
+
+    The browser sometimes dials ``/sockets/events/{id}`` from a bare
+    conversation URL (e.g. conversations listed before the ``/runtime``
+    rewrite); the id is all the routing info available. Returns None when
+    the conversation is unknown.
+
+    Websocket routes cannot use the ``Depends(injector.depends)`` helpers
+    (they require an HTTP ``Request``), so the user context the mapping
+    service wants is seeded directly. This is restricted to the default
+    single-user auth: multi-tenant deployments keep requiring prefixed URLs.
+    """
+    from starlette.datastructures import State
+
+    from openhands.app_server.config import get_global_config
+    from openhands.app_server.shared import server_config
+    from openhands.app_server.user.auth_user_context import AuthUserContext
+    from openhands.app_server.user.specifiy_user_context import USER_CONTEXT_ATTR
+    from openhands.app_server.user_auth.default_user_auth import DefaultUserAuth
+    from openhands.app_server.user_auth.user_auth import UserAuth
+    from openhands.app_server.utils.import_utils import get_impl
+
+    try:
+        cid = UUID(str(conversation_id))
+    except ValueError:
+        return None
+    try:
+        if not issubclass(
+            get_impl(UserAuth, server_config.user_auth_class), DefaultUserAuth
+        ):
+            return None
+        injector = get_global_config().app_conversation_info
+        if injector is None:
+            return None
+        state = State()
+        setattr(
+            state,
+            USER_CONTEXT_ATTR,
+            AuthUserContext(user_auth=DefaultUserAuth()),
+        )
+        async with injector.context(state, None) as info_service:
+            info = await info_service.get_app_conversation_info(cid)
+    except Exception:
+        return None
+    return info.sandbox_id if info else None
+
+
+async def _most_recent_ws_sandbox_id(websocket: WebSocket) -> str | None:
+    """Best-effort sandbox for a direct bash-events dial (no id in path).
+
+    Mirrors the ``file/home`` fallback: working-dir index first, then any
+    running sandbox. Correct for single-conversation use; ambiguous with
+    several live sandboxes.
+    """
+    sandbox_id = working_dir_index.most_recent_sandbox_id
+    if sandbox_id:
+        return sandbox_id
+    try:
+        from openhands.app_server.config import get_global_config
+
+        injector = get_global_config().sandbox
+        if injector is None:
+            return None
+        async with injector.context(websocket.app.state, None) as sandbox_service:
+            page = await sandbox_service.search_sandboxes(limit=1)
+    except Exception:
+        return None
+    if page.items:
+        return page.items[0].id
+    return None
+
+
+@_local_protocol_router.websocket('/sockets/events/{conversation_id}')
+async def ws_events_direct(
+    websocket: WebSocket,
+    conversation_id: str,
+):
+    """Direct events socket (no ``/runtime`` prefix): resolve and bridge."""
+    sandbox_id = await _sandbox_id_for_ws_conversation(websocket, conversation_id)
+    if not sandbox_id:
+        try:
+            await websocket.close(code=1008, reason='conversation not found')
+        except Exception:
+            pass
+        return
+    await _handle_ws_bridge(websocket, sandbox_id, f'/sockets/events/{conversation_id}')
+
+
+@_local_protocol_router.websocket('/sockets/bash-events')
+async def ws_bash_direct(
+    websocket: WebSocket,
+):
+    """Direct bash socket (no ``/runtime`` prefix): bridge most-recent."""
+    sandbox_id = await _most_recent_ws_sandbox_id(websocket)
+    if not sandbox_id:
+        try:
+            await websocket.close(code=1008, reason='sandbox not found')
+        except Exception:
+            pass
+        return
+    await _handle_ws_bridge(websocket, sandbox_id, '/sockets/bash-events')
+
+
 # Expose as local_protocol_router
 local_protocol_router = _local_protocol_router
