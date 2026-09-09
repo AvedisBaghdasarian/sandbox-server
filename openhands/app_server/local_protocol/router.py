@@ -1309,6 +1309,13 @@ async def validate_profile(name: str, body: ValidateProfileRequest, request: Req
             llm = StrictLLM.model_validate(resolved_dict)
     except Exception:
         pass
+    # Pre-flight, not a workload: one attempt, short fuse. Retrying a dead
+    # model here only delays the verdict the caller is waiting on; transient
+    # rate-limit/timeout errors already report back as non-blocking below.
+    try:
+        llm = llm.model_copy(update={'num_retries': 1, 'timeout': 30})
+    except Exception:
+        pass
     messages = [Message(role='user', content=[TextContent(text='ping')])]
     try:
         # Mirror the runtime dispatch and stay async so provider I/O doesn't
