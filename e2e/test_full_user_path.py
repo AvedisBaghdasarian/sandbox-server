@@ -389,6 +389,22 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     )
     assert tuned.ok, 'reasoning tuning saved'
     print(f'[{elapsed()}] reasoning tuned low', flush=True)
+    # Saving can clear the active pointer; re-establish it via API so the
+    # composer offers this profile (UI activation above already covered).
+    try:
+        listed_profiles = api.get(
+            f'{BACKEND_URL}/api/profiles', headers=headers, timeout=30_000
+        )
+        if listed_profiles.ok and listed_profiles.json().get('active_profile') != (
+            PROFILE_NAME
+        ):
+            api.post(
+                f'{BACKEND_URL}/api/profiles/{PROFILE_NAME}/activate',
+                headers=headers,
+                timeout=30_000,
+            )
+    except Exception:
+        pass
     verdict = api.post(
         f'{BACKEND_URL}/api/profiles/{PROFILE_NAME}/validate',
         headers=headers,
@@ -469,7 +485,15 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     conversation_id = match.group(1)
 
     def dump_event_timeline() -> None:
-        # Failure evidence: kinds + timestamps only (no bodies, no secrets).
+        # Failure evidence: kinds plus short redacted snippets of the most
+        # recent action/observation bodies (keys scrubbed). Bodies show WHAT
+        # the agent ran; kinds alone cannot.
+        def scrub(text: str) -> str:
+            for secret in (LLM_API_KEY, SESSION_KEY):
+                if secret and len(secret) > 8:
+                    text = text.replace(secret, '<redacted>')
+            return text
+
         try:
             response = api.get(
                 f'{BACKEND_URL}/api/conversations/{conversation_id}/events/search',
@@ -494,11 +518,16 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
                         {
                             'kind': str(i.get('kind', '?')),
                             'ts': str(i.get('timestamp', '')),
+                            'body': (
+                                scrub(json.dumps(i)[:300])
+                                if i.get('kind') in ('ActionEvent', 'ObservationEvent')
+                                else ''
+                            ),
                         }
                         for i in items
                         if isinstance(i, dict)
-                    ][:100]
-                )
+                    ][-20:]
+                )[:20_000]
             )
         except Exception as exc:
             print(
