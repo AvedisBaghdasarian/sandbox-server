@@ -2860,6 +2860,22 @@ async def runtime_proxy(
 # ---------------------------------------------------------------------------
 
 
+def _is_ws_auth_frame(text: str) -> bool:
+    """True when a text frame is a first-message auth attempt.
+
+    Sandbox agent-servers authenticate websocket clients with an initial
+    ``{"type": "auth", "session_api_key": ...}`` frame. The bridge
+    authenticates upstream itself, so the browser's own auth attempt —
+    which carries the browser-facing key the sandbox does not know — must
+    never reach upstream.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get('type') == 'auth'
+
+
 async def _ws_relay_browser_to_upstream(websocket: WebSocket, upstream) -> None:
     """Relay messages from browser WebSocket to upstream."""
     try:
@@ -2869,6 +2885,8 @@ async def _ws_relay_browser_to_upstream(websocket: WebSocket, upstream) -> None:
             if mtype == 'websocket.disconnect':
                 break
             if 'text' in message and message['text'] is not None:
+                if _is_ws_auth_frame(message['text']):
+                    continue
                 await upstream.send(message['text'])
             elif 'bytes' in message and message['bytes'] is not None:
                 await upstream.send(message['bytes'])
@@ -2884,18 +2902,31 @@ async def _ws_relay_upstream_to_browser(websocket: WebSocket, upstream) -> None:
                 await websocket.send_text(msg)
             elif isinstance(msg, bytes):
                 await websocket.send_bytes(msg)
+    except websockets.exceptions.ConnectionClosed as exc:
+        rcvd = getattr(exc, 'rcvd', None)
+        code = getattr(rcvd, 'code', None)
+        if code == 4001:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                'ws bridge: sandbox rejected bridge authentication (4001); '
+                'check that the sandbox exposes its session key'
+            )
     except Exception:
         pass
 
 
-async def _agent_base_for_ws_bridge(
+async def _agent_endpoint_for_ws_bridge(
     websocket: WebSocket, sandbox_id: str
-) -> str | None:
-    """Resolve a sandbox's agent-server base URL for a websocket bridge.
+) -> tuple[str, str | None] | None:
+    """Resolve a sandbox's agent-server endpoint for a websocket bridge.
 
-    Websocket routes cannot use the ``Depends(injector.depends)`` helpers
-    (they require an HTTP ``Request``), so resolve through the injector
-    context directly. Only the URL string outlives the context — the relay
+    Returns the dialable base URL plus the sandbox's own session key (the
+    per-sandbox random key sandboxes require for websocket first-message
+    auth — the browser-facing key does not open sandbox sockets). Websocket
+    routes cannot use the ``Depends(injector.depends)`` helpers (they
+    require an HTTP ``Request``), so resolve through the injector context
+    directly. Only the URL string and key outlive the context — the relay
     itself uses the ``websockets`` client, not injected services.
     """
     import logging as _logging
@@ -2920,7 +2951,7 @@ async def _agent_base_for_ws_bridge(
                 getattr(sandbox, 'status', None),
             )
             return None
-        return url
+        return url, getattr(sandbox, 'session_api_key', None)
 
 
 async def _handle_ws_bridge(
@@ -2928,18 +2959,30 @@ async def _handle_ws_bridge(
     sandbox_id: str,
     upstream_path: str,
 ) -> None:
-    """Common WebSocket bridge logic (transparent relay)."""
-    agent_base = await _agent_base_for_ws_bridge(websocket, sandbox_id)
-    if not agent_base:
+    """Common WebSocket bridge logic (transparent relay).
+
+    Authenticates upstream first: sandboxes issue each sandbox its own
+    random session key and require it as the websocket's first message
+    (``{"type": "auth", ...}``). The bridge presents that key — the
+    browser never holds it — and the browser→upstream relay drops the
+    browser's own auth frame.
+    """
+    agent_endpoint = await _agent_endpoint_for_ws_bridge(websocket, sandbox_id)
+    if not agent_endpoint:
         try:
             await websocket.close(code=1008, reason='sandbox not found')
         except Exception:
             pass
         return
+    agent_base, sandbox_session_key = agent_endpoint
     query = str(websocket.url.query) if websocket.url.query else ''
     upstream_url = build_upstream_ws_url(agent_base, upstream_path, query)
     try:
         async with websockets.connect(upstream_url, open_timeout=10) as upstream:
+            if sandbox_session_key:
+                await upstream.send(
+                    json.dumps({'type': 'auth', 'session_api_key': sandbox_session_key})
+                )
             await websocket.accept()
             # Bidirectional relay
             t1 = asyncio.create_task(_ws_relay_browser_to_upstream(websocket, upstream))
