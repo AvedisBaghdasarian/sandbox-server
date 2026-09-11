@@ -538,6 +538,19 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     # right after navigating, with the browser's own (wrong) auth key.
     assert_events_socket_streams(conversation_id)
 
+    # Shim-unimplemented /api/* must pass through to the sandbox's real
+    # agent-server instead of 404ing (regression guard for the catch-all).
+    vscode = api.get(
+        f'{BACKEND_URL}/api/vscode/status', headers=headers, timeout=15_000
+    )
+    assert vscode.status != 404, (
+        f'vscode/status fell through to a bare 404 (got {vscode.status})'
+    )
+    print(
+        f'[{elapsed()}] catch-all passthrough OK (vscode/status {vscode.status})',
+        flush=True,
+    )
+
     def dump_event_timeline() -> None:
         # Failure evidence: kinds plus short redacted snippets of the most
         # recent action/observation bodies (keys scrubbed). Bodies show WHAT
@@ -573,7 +586,7 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
                             'kind': str(i.get('kind', '?')),
                             'ts': str(i.get('timestamp', '')),
                             'body': (
-                                scrub(json.dumps(i)[:300])
+                                scrub(json.dumps(i)[:3000])
                                 if i.get('kind') in ('ActionEvent', 'ObservationEvent')
                                 else ''
                             ),

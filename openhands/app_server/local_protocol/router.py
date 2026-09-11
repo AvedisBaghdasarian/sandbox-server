@@ -3156,5 +3156,134 @@ async def ws_bash_direct(
     await _handle_ws_bridge(websocket, sandbox_id, '/sockets/bash-events')
 
 
+# ---------------------------------------------------------------------------
+# Catch-all: forward shim-unimplemented /api/* to the running sandbox
+# ---------------------------------------------------------------------------
+
+# Hop-by-hop headers never forwarded, plus framing headers that would lie
+# after httpx decodes the body (content-encoding stripped, length changed).
+_CATCH_ALL_FILTERED_HEADERS = frozenset(
+    {
+        'connection',
+        'keep-alive',
+        'proxy-authenticate',
+        'proxy-authorization',
+        'te',
+        'trailers',
+        'transfer-encoding',
+        'upgrade',
+        'content-encoding',
+        'content-length',
+    }
+)
+
+# The automation backend is a separate service the shim does not embed; the
+# UI relies on these 404s to treat automation as absent. Paths are captured
+# without the ``/api/`` prefix.
+_CATCH_ALL_EXCLUDED_PREFIXES = ('automation',)
+
+
+async def _api_catch_all_forward(
+    request: Request,
+    path: str,
+    sandbox_service: SandboxService,
+    httpx_client: httpx.AsyncClient,
+) -> Response:
+    """Forward a shim-unimplemented ``/api/*`` call to the running sandbox.
+
+    Gives the UI the sandbox agent-server's own surface for endpoints the
+    shim does not synthesise (vscode status, plugins, bash-execute,
+    workspace-session, workspaces, skills, canvas-extensions, ...).
+    Resolves the most recent running sandbox — like ``file/upload`` — and
+    never boots or resumes one for a probe. Must be registered as the last
+    ``/api`` route so explicit shim routes always win.
+    """
+    for prefix in _CATCH_ALL_EXCLUDED_PREFIXES:
+        if path.startswith(prefix):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail='No automation backend',
+            )
+    sandbox_id = working_dir_index.most_recent_sandbox_id
+    if not sandbox_id:
+        page = await sandbox_service.search_sandboxes(limit=1)
+        if page.items:
+            sandbox_id = page.items[0].id
+    if not sandbox_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail='No sandbox available'
+        )
+    sandbox = await sandbox_service.get_sandbox(sandbox_id)
+    if not sandbox or sandbox.status != SandboxStatus.RUNNING:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail='No sandbox available'
+        )
+    agent_url = _get_agent_server_url_from_sandbox(sandbox)
+    if not agent_url:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail='No agent server URL'
+        )
+
+    query = str(request.url.query)
+    url = f'{agent_url.rstrip("/")}/api/{path}'
+    if query:
+        url += f'?{query}'
+    headers = (
+        {'X-Session-API-Key': sandbox.session_api_key}
+        if sandbox.session_api_key
+        else {}
+    )
+    ctype = request.headers.get('content-type')
+    if ctype:
+        headers['content-type'] = ctype
+    body = await request.body() if request.method not in ('GET', 'HEAD') else None
+    try:
+        resp = await httpx_client.request(
+            request.method,
+            url,
+            content=body,
+            headers=headers,
+            timeout=30.0,
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f'Failed to reach sandbox: {exc}',
+        ) from exc
+
+    response_headers = {
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower() not in _CATCH_ALL_FILTERED_HEADERS
+    }
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=response_headers,
+        media_type=resp.headers.get('content-type'),
+    )
+
+
+# The catch-all lives on its own router because it must be included AFTER
+# the real agent-server routers in app.py: real endpoints (e.g.
+# ``/api/profiles`` on the settings router) must win, and only true gaps
+# fall through to the sandbox.
+api_catch_all_router = APIRouter()
+
+
+@api_catch_all_router.api_route(
+    '/api/{path:path}',
+    methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
+    dependencies=[Depends(_require_global_auth)],
+)
+async def api_catch_all(
+    path: str,
+    request: Request,
+    sandbox_service: SandboxService = _sandbox_service_dep,
+    httpx_client: httpx.AsyncClient = _httpx_client_dep,
+):
+    return await _api_catch_all_forward(request, path, sandbox_service, httpx_client)
+
+
 # Expose as local_protocol_router
 local_protocol_router = _local_protocol_router

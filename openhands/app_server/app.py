@@ -16,7 +16,10 @@ from fastapi.responses import JSONResponse
 from openhands.app_server import v1_router
 from openhands.app_server.config import get_app_lifespan_service
 from openhands.app_server.integrations.service_types import AuthenticationError
-from openhands.app_server.local_protocol.router import local_protocol_router
+from openhands.app_server.local_protocol.router import (
+    api_catch_all_router,
+    local_protocol_router,
+)
 from openhands.app_server.mcp.mcp_router import init_tavily_proxy, mcp_server
 from openhands.app_server.middleware import (
     CacheControlMiddleware,
@@ -72,6 +75,9 @@ async def authentication_error_handler(request: Request, exc: AuthenticationErro
 app.include_router(local_protocol_router)
 app.include_router(v1_router.router)
 app.include_router(health_router)
+# Last: forward shim-unimplemented /api/* to the running sandbox, without
+# shadowing any real agent-server route above.
+app.include_router(api_catch_all_router)
 
 # Middleware and static file setup (merged from listen.py)
 if os.getenv('SERVE_FRONTEND', 'false').lower() == 'true':
