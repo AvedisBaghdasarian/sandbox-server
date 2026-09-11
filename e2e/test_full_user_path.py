@@ -52,6 +52,56 @@ def elapsed() -> str:
     return f'{time.monotonic() - _started_at:.1f}s'
 
 
+def assert_events_socket_streams(conversation_id: str) -> None:
+    """The events websocket must actually deliver frames through the bridge.
+
+    Regression guard for the silent-socket failure class: a bare handshake
+    (101) proves nothing. This dials the socket, replays the browser's own
+    first-message auth attempt (which carries the browser-facing key the
+    sandbox does not know), and requires at least one real frame — the
+    bridge must authenticate upstream with the sandbox's own session key
+    and swallow the browser's attempt.
+    """
+    import asyncio
+
+    import websockets
+
+    ws_base = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://')
+    ws_url = f'{ws_base}/sockets/events/{conversation_id}?resend_mode=all'
+
+    async def run() -> str:
+        try:
+            async with websockets.connect(ws_url, open_timeout=15) as ws:
+                await ws.send(
+                    json.dumps({'type': 'auth', 'session_api_key': SESSION_KEY})
+                )
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=25)
+                    return f'frame:{str(msg)[:60]}'
+                except (asyncio.TimeoutError, TimeoutError):
+                    return 'TIMEOUT-no-frames'
+        except Exception as exc:
+            code = getattr(getattr(exc, 'rcvd', None), 'code', None)
+            return f'ERROR {type(exc).__name__} code={code}'
+
+    outcome: dict[str, str] = {}
+
+    def _probe() -> None:
+        # Own thread + loop: Playwright's sync API already runs an asyncio
+        # loop in this thread, so asyncio.run() would refuse to nest.
+        outcome['result'] = asyncio.run(run())
+
+    import threading
+
+    thread = threading.Thread(target=_probe, daemon=True)
+    thread.start()
+    thread.join(timeout=60)
+    result = outcome.get('result', 'ERROR probe thread did not finish in 60s')
+    if not result.startswith('frame:'):
+        raise AssertionError(f'events websocket did not stream frames: {result}')
+    print(f'[{elapsed()}] events websocket streams (bridge auth OK)', flush=True)
+
+
 def dismiss_telemetry_dialog(page: Page) -> None:
     """Opt out of telemetry if the dialog is showing; no-op otherwise."""
     try:
@@ -483,6 +533,10 @@ def test_backend_connection_profile_and_talking_conversation(page: Page) -> None
     match = re.search(r'/conversations/([^/?#]+)', page.url)
     assert match, 'conversation id readable from URL'
     conversation_id = match.group(1)
+
+    # The UI's live event path, exercised exactly as a browser would:
+    # right after navigating, with the browser's own (wrong) auth key.
+    assert_events_socket_streams(conversation_id)
 
     def dump_event_timeline() -> None:
         # Failure evidence: kinds plus short redacted snippets of the most
